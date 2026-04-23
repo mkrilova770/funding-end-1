@@ -103,7 +103,7 @@ export async function GET(req: Request) {
     page: 1,
     pageSize: 5,
     visibleExchanges: [exchangeA, exchangeB],
-    sortBy: "base",
+    sortBy: "coins",
     sortDir: "asc",
   });
 
