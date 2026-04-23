@@ -1,0 +1,196 @@
+"use client";
+
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
+import { ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
+import type { FundingPeriod } from "@/lib/services/funding-table";
+import type { FundingPeriodUi } from "@/features/funding-table/funding-ui-store";
+import { useFundingUiStore } from "@/features/funding-table/funding-ui-store";
+import { EmptyDataHint } from "@/features/funding-table/empty-data-hint";
+import { FundingControls } from "@/features/funding-table/funding-controls";
+import { FundingTableView } from "@/features/funding-table/funding-table";
+import { TrashBinDialog } from "@/features/funding-table/trash-bin-dialog";
+import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/theme-toggle";
+
+function mapPeriod(p: FundingPeriodUi): FundingPeriod {
+  return p;
+}
+
+export function FundingDashboard() {
+  const period = useFundingUiStore((s) => s.period);
+  const page = useFundingUiStore((s) => s.page);
+  const pageSize = useFundingUiStore((s) => s.pageSize);
+  const search = useFundingUiStore((s) => s.search);
+  const columnVisibility = useFundingUiStore((s) => s.columnVisibility);
+  const setPage = useFundingUiStore((s) => s.setPage);
+
+  const sortColumn = useFundingUiStore((s) => s.sortColumn);
+  const sortDirection = useFundingUiStore((s) => s.sortDirection);
+  const hiddenTokens = useFundingUiStore((s) => s.hiddenTokens);
+  const hideToken = useFundingUiStore((s) => s.hideToken);
+
+  const hiddenSet = useMemo(() => new Set(hiddenTokens), [hiddenTokens]);
+
+  const visibleExchanges = useMemo(() => {
+    return ALL_EXCHANGE_SLUGS.filter((slug) => columnVisibility[slug] !== false);
+  }, [columnVisibility]);
+
+  const query = useQuery({
+    queryKey: [
+      "funding-table",
+      period,
+      page,
+      pageSize,
+      search,
+      visibleExchanges.join("|"),
+      sortColumn,
+      sortDirection,
+    ],
+    staleTime: period === "now" ? 42_000 : 120_000,
+    placeholderData: keepPreviousData,
+    refetchOnWindowFocus: false,
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.set("period", mapPeriod(period));
+      params.set("page", String(page));
+      params.set("pageSize", String(pageSize));
+      if (search.trim()) params.set("q", search.trim());
+      params.set("visible", visibleExchanges.join(","));
+      params.set("sort", sortColumn);
+      params.set("dir", sortDirection);
+      const res = await fetch(`/api/funding/table?${params.toString()}`);
+      if (!res.ok) throw new Error("Не удалось загрузить данные");
+      return (await res.json()) as {
+        updatedAt: string | null;
+        total: number;
+        page: number;
+        pageSize: number;
+        rows: import("@/lib/services/funding-table").FundingTableRow[];
+        meta: {
+          exchangeCount: number;
+          marketCount: number;
+          live?: boolean;
+          needsHistoryDb?: boolean;
+        };
+      };
+    },
+    refetchInterval: period === "now" ? 50_000 : 180_000,
+  });
+
+  const filteredRows = useMemo(() => {
+    const rows = query.data?.rows ?? [];
+    if (hiddenSet.size === 0) return rows;
+    return rows.filter((r) => !hiddenSet.has(r.baseAsset));
+  }, [query.data?.rows, hiddenSet]);
+
+  const filteredTotal = (query.data?.total ?? 0) - hiddenSet.size;
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filteredTotal / (query.data?.pageSize ?? pageSize)),
+  );
+
+  const pages = useMemo(() => {
+    const cur = query.data?.page ?? page;
+    const windowSize = 5;
+    const start = Math.max(1, cur - Math.floor(windowSize / 2));
+    const end = Math.min(totalPages, start + windowSize - 1);
+    const s2 = Math.max(1, end - windowSize + 1);
+    const out: number[] = [];
+    for (let i = s2; i <= end; i++) out.push(i);
+    return out;
+  }, [query.data?.page, page, totalPages]);
+
+  return (
+    <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 px-4 py-6">
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-4">
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Отслеживание фандинга криптовалют
+          </h1>
+          <ThemeToggle />
+        </div>
+        <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+          <span>USDT perpetual</span>
+          <span className="hidden sm:inline">·</span>
+          <span>
+            Обновлено:{" "}
+            {query.data?.updatedAt
+              ? new Date(query.data.updatedAt).toLocaleString("ru-RU")
+              : "—"}
+          </span>
+          {query.data?.meta?.live ? (
+            <>
+              <span className="hidden sm:inline">·</span>
+              <span className="text-emerald-700 dark:text-emerald-400">
+                Режим «Сейчас»: данные с бирж, кэш ~45 с
+              </span>
+            </>
+          ) : null}
+        </div>
+      </div>
+
+      <FundingControls />
+
+      {!query.isLoading && query.isSuccess ? (
+        <EmptyDataHint
+          period={period}
+          total={query.data.total}
+          meta={query.data.meta}
+          hasSearch={Boolean(search.trim())}
+        />
+      ) : null}
+
+      <FundingTableView
+        rows={filteredRows}
+        isLoading={query.isLoading}
+        error={query.error ? (query.error as Error).message : null}
+        onHideToken={hideToken}
+      />
+      <TrashBinDialog />
+
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="text-xs text-muted-foreground">
+          Всего монет: {filteredTotal}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page <= 1 || query.isFetching}
+            onClick={() => setPage(page - 1)}
+          >
+            Назад
+          </Button>
+
+          {pages.map((p) => (
+            <Button
+              key={p}
+              type="button"
+              variant={p === (query.data?.page ?? page) ? "default" : "outline"}
+              size="sm"
+              className="min-w-9"
+              disabled={query.isFetching}
+              onClick={() => setPage(p)}
+            >
+              {p}
+            </Button>
+          ))}
+
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages || query.isFetching}
+            onClick={() => setPage(page + 1)}
+          >
+            Вперёд
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

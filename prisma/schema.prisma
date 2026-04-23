@@ -1,0 +1,94 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Exchange {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  name      String
+  sortOrder Int      @default(0)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  markets     Market[]
+  adapterLogs AdapterLog[]
+}
+
+model Market {
+  id           String     @id @default(cuid())
+  exchangeId   String
+  exchange     Exchange   @relation(fields: [exchangeId], references: [id], onDelete: Cascade)
+  nativeSymbol String
+  baseAsset    String
+  quoteAsset   String
+  kind         String @default("USDT_PERP")
+  active       Boolean    @default(true)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  latest        FundingLatest?
+  historyPoints FundingHistoryPoint[]
+
+  @@unique([exchangeId, nativeSymbol])
+  @@index([baseAsset])
+  @@index([exchangeId, baseAsset])
+}
+
+model FundingLatest {
+  id              String    @id @default(cuid())
+  marketId        String    @unique
+  market          Market    @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  rate            Decimal
+  nextFundingTime DateTime?
+  fetchedAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+model FundingHistoryPoint {
+  id          String   @id @default(cuid())
+  marketId    String
+  market      Market   @relation(fields: [marketId], references: [id], onDelete: Cascade)
+  fundingTime DateTime
+  rate        Decimal
+  createdAt   DateTime @default(now())
+
+  @@unique([marketId, fundingTime])
+  @@index([marketId, fundingTime(sort: Desc)])
+  @@index([fundingTime])
+}
+
+model SyncRun {
+  id         String       @id @default(cuid())
+  startedAt  DateTime     @default(now())
+  finishedAt DateTime?
+  status     String
+  adapterLogs AdapterLog[]
+}
+
+model AdapterLog {
+  id         String    @id @default(cuid())
+  syncRunId  String
+  syncRun    SyncRun   @relation(fields: [syncRunId], references: [id], onDelete: Cascade)
+  exchangeId String?
+  exchange   Exchange? @relation(fields: [exchangeId], references: [id], onDelete: SetNull)
+  status     String
+  message    String?
+  durationMs Int?
+  createdAt  DateTime  @default(now())
+
+  @@index([syncRunId])
+  @@index([exchangeId])
+}
+
+// Служебное состояние (например, round-robin курсор для инкрементальной истории).
+model AppState {
+  id              Int @id @default(1)
+  historyCursor   Int @default(0)
+  updatedAt       DateTime @updatedAt
+}

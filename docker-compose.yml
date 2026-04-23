@@ -1,0 +1,27 @@
+services:
+  # По умолчанию проект использует SQLite (файл в образе/томе).
+  # Для PostgreSQL добавьте сервис postgres и DATABASE_URL сами.
+  web:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: file:/data/dev.db
+      SYNC_INTERVAL_MS: "45000"
+    volumes:
+      - appdata:/data
+    command: ["sh", "-c", "npx prisma db push && npm run start"]
+
+  worker:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: file:/data/dev.db
+      SYNC_INTERVAL_MS: "45000"
+    volumes:
+      - appdata:/data
+    command: ["sh", "-c", "npx prisma db push && npx tsx worker/entry.ts"]
+
+volumes:
+  appdata:
