@@ -20,6 +20,9 @@ export type LatestFunding = {
 
 export type KlinePoint = {
   time: number;
+  open?: number;
+  high?: number;
+  low?: number;
   close: number;
 };
 
