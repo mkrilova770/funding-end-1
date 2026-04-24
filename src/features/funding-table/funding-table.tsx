@@ -69,6 +69,34 @@ type CompareSelection = {
   exchangeB: ExchangeAdapterSlug | null;
 };
 
+function futuresLink(slug: ExchangeAdapterSlug, base: string): string | null {
+  const b = base.toUpperCase();
+  switch (slug) {
+    case "binance":
+      return `https://www.binance.com/en/futures/${b}USDT`;
+    case "bybit":
+      return `https://www.bybit.com/trade/usdt/${b}USDT`;
+    case "okx":
+      return `https://www.okx.com/trade-swap/${b.toLowerCase()}-usdt-swap`;
+    case "gate":
+      return `https://www.gate.io/futures_trade/USDT/${b}_USDT`;
+    case "bitget":
+      return `https://www.bitget.com/futures/usdt/${b}USDT`;
+    case "kucoin":
+      return `https://www.kucoin.com/futures/trade/${b}-USDT`;
+    case "mexc":
+      return `https://futures.mexc.com/exchange/${b}_USDT?type=linear_swap`;
+    case "bingx":
+      return `https://bingx.com/en-us/futures/forward/${b}USDT`;
+    case "lbank":
+      return `https://www.lbank.com/futures/${b}USDT/`;
+    case "xt":
+      return `https://www.xt.com/en/futures/trade/${b}_usdt`;
+    default:
+      return null;
+  }
+}
+
 export function FundingTableView({
   rows,
   isLoading,
@@ -97,9 +125,15 @@ export function FundingTableView({
   function handleCellClick(
     slug: ExchangeAdapterSlug,
     base: string,
-    shiftKey: boolean,
+    modifiers: { shiftKey: boolean; ctrlOrMetaKey: boolean },
   ) {
-    if (!shiftKey) {
+    if (modifiers.ctrlOrMetaKey) {
+      const url = futuresLink(slug, base);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    if (!modifiers.shiftKey) {
       setCompare(null);
       setHistory({ exchange: slug, base });
       return;
@@ -142,7 +176,7 @@ export function FundingTableView({
           {pendingBase}: выбрана {EXCHANGE_LABELS[pendingExchange!]}
         </span>
         <span className="text-sky-700 dark:text-sky-400">
-          — Shift+клик по второй бирже для сравнения
+          — Shift+клик по второй бирже для сравнения · Ctrl/Cmd+клик открыть фьючерсы
         </span>
         <button
           type="button"
@@ -287,7 +321,7 @@ function CellRenderer({
   onCellClick: (
     slug: ExchangeAdapterSlug,
     base: string,
-    shiftKey: boolean,
+    modifiers: { shiftKey: boolean; ctrlOrMetaKey: boolean },
   ) => void;
   onHideToken?: (base: string) => void;
   pendingExchange: ExchangeAdapterSlug | null;
@@ -316,7 +350,12 @@ function CellRenderer({
           : "",
         fundingCellClass(v),
       )}
-      onClick={(e) => onCellClick(slug, row.baseAsset, e.shiftKey)}
+      onClick={(e) =>
+        onCellClick(slug, row.baseAsset, {
+          shiftKey: e.shiftKey,
+          ctrlOrMetaKey: e.ctrlKey || e.metaKey,
+        })
+      }
       aria-label={`История фандинга ${row.baseAsset} на ${label}`}
     >
       {formatFundingPercent(v)}

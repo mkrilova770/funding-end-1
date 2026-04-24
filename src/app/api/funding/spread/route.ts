@@ -124,18 +124,48 @@ export async function GET(req: Request) {
     bidA: number | null;
     askB: number | null;
     bidB: number | null;
-    entryAtoB: number | null;
-    entryBtoA: number | null;
+    aToB: {
+      entrySpread: number | null;
+      exitSpread: number | null;
+      netResult: number | null;
+    };
+    bToA: {
+      entrySpread: number | null;
+      exitSpread: number | null;
+      netResult: number | null;
+    };
   } | null = null;
 
   if (baA && baB) {
+    const entryAtoB = baA.ask > 0 ? ((baB.bid - baA.ask) / baA.ask) * 100 : null;
+    const exitAtoB = baA.bid > 0 ? ((baB.ask - baA.bid) / baA.bid) * 100 : null;
+    const netAtoB =
+      entryAtoB !== null && exitAtoB !== null
+        ? entryAtoB - exitAtoB
+        : null;
+
+    const entryBtoA = baB.ask > 0 ? ((baA.bid - baB.ask) / baB.ask) * 100 : null;
+    const exitBtoA = baB.bid > 0 ? ((baA.ask - baB.bid) / baB.bid) * 100 : null;
+    const netBtoA =
+      entryBtoA !== null && exitBtoA !== null
+        ? entryBtoA - exitBtoA
+        : null;
+
     currentSpread = {
       askA: baA.ask,
       bidA: baA.bid,
       askB: baB.ask,
       bidB: baB.bid,
-      entryAtoB: baA.ask > 0 ? ((baB.bid - baA.ask) / baA.ask) * 100 : null,
-      entryBtoA: baB.ask > 0 ? ((baA.bid - baB.ask) / baB.ask) * 100 : null,
+      aToB: {
+        entrySpread: entryAtoB,
+        exitSpread: exitAtoB,
+        netResult: netAtoB,
+      },
+      bToA: {
+        entrySpread: entryBtoA,
+        exitSpread: exitBtoA,
+        netResult: netBtoA,
+      },
     };
   }
 
@@ -161,9 +191,11 @@ export async function GET(req: Request) {
         for (const ka of klinesA) {
           const cb = findCloseB(mapB, ka.time, intervalMs);
           if (cb === undefined || cb === 0 || ka.close === 0) continue;
+          // Directional entry-like spread for selected side A -> B (long A, short B):
+          // negative => worse entry for this direction, positive => better entry.
           history.push({
             time: ka.time,
-            spreadPct: ((ka.close - cb) / cb) * 100,
+            spreadPct: ka.close > 0 ? ((cb - ka.close) / ka.close) * 100 : 0,
           });
         }
         history.sort((a, b) => a.time - b.time);

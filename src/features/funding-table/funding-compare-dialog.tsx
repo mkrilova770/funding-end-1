@@ -695,8 +695,16 @@ type SpreadPayload = {
     bidA: number | null;
     askB: number | null;
     bidB: number | null;
-    entryAtoB: number | null;
-    entryBtoA: number | null;
+    aToB: {
+      entrySpread: number | null;
+      exitSpread: number | null;
+      netResult: number | null;
+    };
+    bToA: {
+      entrySpread: number | null;
+      exitSpread: number | null;
+      netResult: number | null;
+    };
   } | null;
   intervalMin: number;
   supportsKlinesA: boolean;
@@ -720,7 +728,9 @@ function useSpreadData(
       params.set("exchangeB", exchangeB!);
       params.set("base", baseAsset!);
       params.set("interval", String(intervalMin));
-      const res = await fetch(`/api/funding/spread?${params.toString()}`);
+      const res = await fetch(`/api/funding/spread?${params.toString()}`, {
+        cache: "no-store",
+      });
       if (!res.ok) {
         const j = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(j.error ?? "Ошибка загрузки спреда");
@@ -729,6 +739,7 @@ function useSpreadData(
     },
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
+    refetchInterval: enabled ? 10_000 : false,
   });
 }
 
@@ -818,12 +829,13 @@ const SPREAD_INTERVALS = [
   { value: 240, label: "4ч" },
 ] as const;
 
-function SpreadChart({ data, labelA, labelB, interval, onIntervalChange }: {
+function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showReverse }: {
   data: SpreadPayload;
   labelA: string;
   labelB: string;
   interval: number;
   onIntervalChange: (v: number) => void;
+  showReverse: boolean;
 }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -915,6 +927,22 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange }: {
 
   const fmtPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(4)}%`;
   const pctClass = (v: number) => v >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400";
+  const scenario = (entry: number, net: number) => {
+    if (net > 0) return entry > 0 ? "ideal" : "convergence";
+    return "loss";
+  };
+  const scenarioTone = (s: "ideal" | "convergence" | "loss") =>
+    s === "ideal"
+      ? "border-emerald-500/30 bg-emerald-500/5"
+      : s === "convergence"
+        ? "border-amber-500/30 bg-amber-500/5"
+        : "border-rose-500/30 bg-rose-500/5";
+  const scenarioLabel = (s: "ideal" | "convergence" | "loss") =>
+    s === "ideal"
+      ? "🟢 Идеальный"
+      : s === "convergence"
+        ? "🟡 Допустимый"
+        : "🔴 Плохой";
 
   function fmtPrice(v: number | null | undefined): string {
     if (v == null || !Number.isFinite(v)) return "—";
@@ -995,38 +1023,74 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange }: {
 
   return (
     <div className="space-y-3">
-      {/* Current bid/ask spreads — two direction cards */}
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-        {cs && cs.entryAtoB != null && (
-          <div className="space-y-1.5 rounded-xl border border-border/60 bg-card px-4 py-3 shadow-sm">
+      {/* Current bid/ask spreads — entry/exit/net by direction */}
+      <div className={cn("grid grid-cols-1 gap-2", showReverse && "sm:grid-cols-2")}>
+        {cs && cs.aToB.entrySpread != null && cs.aToB.exitSpread != null && cs.aToB.netResult != null && (() => {
+          const sc = scenario(cs.aToB.entrySpread, cs.aToB.netResult);
+          return (
+          <div className={cn("space-y-2 rounded-xl border px-4 py-3 shadow-sm", scenarioTone(sc))}>
             <div className="flex items-center gap-2">
               <span className="inline-block size-3 shrink-0 rounded-full bg-emerald-500" />
               <span className="text-sm font-semibold">{labelA} → {labelB}</span>
-              <span className={cn("ml-auto text-sm font-bold tabular-nums", pctClass(cs.entryAtoB))}>
-                {fmtPct(cs.entryAtoB)}
+              <span className={cn("ml-auto text-sm font-bold tabular-nums", pctClass(cs.aToB.netResult))}>
+                {fmtPct(cs.aToB.netResult)}
               </span>
             </div>
+            <div className="text-[11px] font-semibold text-muted-foreground">{scenarioLabel(sc)}</div>
             <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-muted-foreground">
               <span>Ask {labelA}: <span className="tabular-nums text-foreground">{fmtPrice(cs.askA)}</span></span>
               <span>Bid {labelB}: <span className="tabular-nums text-foreground">{fmtPrice(cs.bidB)}</span></span>
             </div>
+            <div className="grid grid-cols-3 gap-2 text-[11px]">
+              <div className="rounded-md bg-background/60 px-2 py-1">
+                <span className="text-muted-foreground">Доход на входе</span>
+                <div className={cn("font-semibold tabular-nums", pctClass(cs.aToB.entrySpread))}>{fmtPct(cs.aToB.entrySpread)}</div>
+              </div>
+              <div className="rounded-md bg-background/60 px-2 py-1">
+                <span className="text-muted-foreground">Стоимость выхода</span>
+                <div className={cn("font-semibold tabular-nums", pctClass(cs.aToB.exitSpread))}>{fmtPct(cs.aToB.exitSpread)}</div>
+              </div>
+              <div className="rounded-md bg-background/60 px-2 py-1">
+                <span className="text-muted-foreground">Итог (Entry - Exit)</span>
+                <div className={cn("font-semibold tabular-nums", pctClass(cs.aToB.netResult))}>{fmtPct(cs.aToB.netResult)}</div>
+              </div>
+            </div>
           </div>
-        )}
-        {cs && cs.entryBtoA != null && (
-          <div className="space-y-1.5 rounded-xl border border-border/60 bg-card px-4 py-3 shadow-sm">
+          );
+        })()}
+        {showReverse && cs && cs.bToA.entrySpread != null && cs.bToA.exitSpread != null && cs.bToA.netResult != null && (() => {
+          const sc = scenario(cs.bToA.entrySpread, cs.bToA.netResult);
+          return (
+          <div className={cn("space-y-2 rounded-xl border px-4 py-3 shadow-sm", scenarioTone(sc))}>
             <div className="flex items-center gap-2">
               <span className="inline-block size-3 shrink-0 rounded-full bg-blue-500" />
               <span className="text-sm font-semibold">{labelB} → {labelA}</span>
-              <span className={cn("ml-auto text-sm font-bold tabular-nums", pctClass(cs.entryBtoA))}>
-                {fmtPct(cs.entryBtoA)}
+              <span className={cn("ml-auto text-sm font-bold tabular-nums", pctClass(cs.bToA.netResult))}>
+                {fmtPct(cs.bToA.netResult)}
               </span>
             </div>
+            <div className="text-[11px] font-semibold text-muted-foreground">{scenarioLabel(sc)}</div>
             <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-muted-foreground">
               <span>Ask {labelB}: <span className="tabular-nums text-foreground">{fmtPrice(cs.askB)}</span></span>
               <span>Bid {labelA}: <span className="tabular-nums text-foreground">{fmtPrice(cs.bidA)}</span></span>
             </div>
+            <div className="grid grid-cols-3 gap-2 text-[11px]">
+              <div className="rounded-md bg-background/60 px-2 py-1">
+                <span className="text-muted-foreground">Доход на входе</span>
+                <div className={cn("font-semibold tabular-nums", pctClass(cs.bToA.entrySpread))}>{fmtPct(cs.bToA.entrySpread)}</div>
+              </div>
+              <div className="rounded-md bg-background/60 px-2 py-1">
+                <span className="text-muted-foreground">Стоимость выхода</span>
+                <div className={cn("font-semibold tabular-nums", pctClass(cs.bToA.exitSpread))}>{fmtPct(cs.bToA.exitSpread)}</div>
+              </div>
+              <div className="rounded-md bg-background/60 px-2 py-1">
+                <span className="text-muted-foreground">Итог (Entry - Exit)</span>
+                <div className={cn("font-semibold tabular-nums", pctClass(cs.bToA.netResult))}>{fmtPct(cs.bToA.netResult)}</div>
+              </div>
+            </div>
           </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* Average historical spread (single line, close-price based) */}
@@ -1046,10 +1110,12 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange }: {
         })}
       </div>
 
-      {/* Single-line chart: close-price spread A vs B */}
+      {/* Single-line chart: directional entry-like spread for selected side A -> B */}
       <div className="shrink-0 overflow-hidden rounded-xl border border-border/60 bg-card shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 sm:px-6 sm:py-5">
-          <span className="text-sm font-medium">Спред close-цен: {labelA} vs {labelB}</span>
+          <span className="text-sm font-medium">
+            Спред входа (по close): {labelA} → {labelB}
+          </span>
           <div className="flex items-center gap-1.5">
             {SPREAD_INTERVALS.map((iv) => (
               <button
@@ -1200,11 +1266,13 @@ export function FundingCompareDialog({
   const [exchangeA, setExchangeA] = useState<ExchangeAdapterSlug | null>(null);
   const [exchangeB, setExchangeB] = useState<ExchangeAdapterSlug | null>(null);
   const [spreadInterval, setSpreadInterval] = useState<number>(240);
+  const [showReverseSpread, setShowReverseSpread] = useState(true);
 
   useEffect(() => {
     if (open) {
       setExchangeA(initialExchangeA);
       setExchangeB(initialExchangeB);
+      setShowReverseSpread(true);
     }
   }, [open, initialExchangeA, initialExchangeB]);
 
@@ -1310,15 +1378,37 @@ export function FundingCompareDialog({
               {/* Price spread section */}
               {spreadQuery.data && (
                 <div className="space-y-2">
-                  <h3 className="text-sm font-semibold text-foreground">
-                    Ценовой спред (вход / выход)
-                  </h3>
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold text-foreground">
+                      Ценовой спред (вход / выход)
+                    </h3>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowReverseSpread((v) => !v)}
+                        className="rounded-md border border-border/80 bg-background px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted/40"
+                      >
+                        {showReverseSpread ? "Скрыть 2-ю колонку" : "Показать 2-ю колонку"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void spreadQuery.refetch();
+                        }}
+                        disabled={spreadQuery.isFetching}
+                        className="rounded-md border border-border/80 bg-background px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:bg-muted/40 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {spreadQuery.isFetching ? "Обновление..." : "Обновить Bid/Ask"}
+                      </button>
+                    </div>
+                  </div>
                   <SpreadChart
                     data={spreadQuery.data}
                     labelA={labelA}
                     labelB={labelB}
                     interval={spreadInterval}
                     onIntervalChange={setSpreadInterval}
+                    showReverse={showReverseSpread}
                   />
                 </div>
               )}
