@@ -57,8 +57,17 @@ export function TelegramNotifySettingsDialog() {
     queryKey: ["telegram-digest-settings"],
     queryFn: async (): Promise<SettingsResponse> => {
       const res = await fetch("/api/settings/telegram-digest");
-      if (!res.ok) throw new Error("Не удалось загрузить настройки");
-      return (await res.json()) as SettingsResponse;
+      const j = (await res.json().catch(() => ({}))) as SettingsResponse & {
+        error?: string;
+        hint?: string;
+      };
+      if (!res.ok) {
+        const parts = [j.error, j.hint].filter(Boolean);
+        throw new Error(
+          parts.length ? parts.join(" ") : "Не удалось загрузить настройки",
+        );
+      }
+      return j as SettingsResponse;
     },
     enabled: open,
   });
@@ -194,7 +203,9 @@ export function TelegramNotifySettingsDialog() {
           {q.isLoading ? (
             <p className="text-muted-foreground">Загрузка…</p>
           ) : q.isError ? (
-            <p className="text-destructive">Не удалось загрузить настройки</p>
+            <p className="text-sm text-destructive whitespace-pre-wrap">
+              {(q.error as Error)?.message ?? "Не удалось загрузить настройки"}
+            </p>
           ) : (
             <>
               {!q.data?.hasTelegramEnv ? (

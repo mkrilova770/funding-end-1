@@ -38,8 +38,20 @@ export async function GET() {
     });
   } catch (e) {
     console.error("[telegram-digest settings GET]", e);
+    const raw = e instanceof Error ? e.message : String(e);
+    const needsSchema =
+      /does not exist|no such table|relation|TelegramDigestConfig|P20[0-9]{2}/i.test(
+        raw,
+      );
     return NextResponse.json(
-      { error: "Не удалось прочитать настройки" },
+      {
+        error: needsSchema
+          ? "В базе ещё нет таблицы настроек Telegram (схема Prisma не применена к этой БД)."
+          : "Не удалось прочитать настройки.",
+        hint: needsSchema
+          ? "На Railway один раз выполните: npx prisma db push (в shell сервиса, с тем же DATABASE_URL, что у веба)."
+          : undefined,
+      },
       { status: 500 },
     );
   }
