@@ -14,6 +14,7 @@ import { FundingControls } from "@/features/funding-table/funding-controls";
 import { FundingTableView } from "@/features/funding-table/funding-table";
 import { SavedTokensWorkspace } from "@/features/funding-table/saved-tokens-workspace";
 import { TrashBinDialog } from "@/features/funding-table/trash-bin-dialog";
+import { TelegramNotifySettingsDialog } from "@/features/funding-table/telegram-notify-settings-dialog";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
 
@@ -169,7 +170,10 @@ export function FundingDashboard() {
           <h1 className="text-2xl font-semibold tracking-tight">
             Отслеживание фандинга криптовалют
           </h1>
-          <ThemeToggle />
+          <div className="flex shrink-0 items-center gap-2">
+            <TelegramNotifySettingsDialog />
+            <ThemeToggle />
+          </div>
         </div>
         <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
           <span>USDT perpetual</span>

@@ -92,3 +92,14 @@ model AppState {
   historyCursor   Int @default(0)
   updatedAt       DateTime @updatedAt
 }
+
+// Singleton id=1: настройки Telegram-дайджеста max спреда (воркер читает из БД).
+model TelegramDigestConfig {
+  id                   Int      @id @default(1)
+  /// Порог max спреда по фандингу (доля); 0.0025 = 0.25%
+  maxSpreadThreshold   Float    @default(0.0025)
+  /// JSON массив строк "HH:MM" по Europe/Moscow
+  mskSlotsJson         String   @default("[\"22:30\",\"02:30\",\"06:30\",\"10:30\",\"14:30\",\"18:30\"]")
+  enabled              Boolean  @default(false)
+  updatedAt            DateTime @updatedAt
+}

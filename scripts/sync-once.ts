@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { prisma } from "../src/lib/db/prisma";
 import { runFundingSync } from "../src/lib/services/sync";
 

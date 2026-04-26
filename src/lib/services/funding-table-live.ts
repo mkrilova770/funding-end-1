@@ -227,6 +227,16 @@ export async function getLiveFundingTableNow(opts: {
   };
 }
 
+/** Все строки live-таблицы без пагинации (дайджесты, уведомления). */
+export async function getLiveFundingTableAllRows(
+  visibleExchanges?: ExchangeAdapterSlug[],
+): Promise<FundingTableRow[]> {
+  const visible =
+    visibleExchanges?.length ? visibleExchanges : [...ALL_EXCHANGE_SLUGS];
+  const cached = await ensureNowCache(visible, undefined);
+  return sortFundingTableRows([...cached.built], "maxSpread", "desc");
+}
+
 /* ------------------------------------------------------------------ */
 /*  Период (week / month) — live: суммы фандинга за N дней            */
 /* ------------------------------------------------------------------ */
