@@ -15,6 +15,8 @@ type LbankMarketRow = {
   fundingRate?: string | number;
   lastPrice?: string | number;
   instrumentStatus?: string | number;
+  /** 24h volume; delisted instruments often stay status "2" with zero volume */
+  volume?: string | number;
 };
 
 type LbankMarketDataResp = {
@@ -72,6 +74,8 @@ export const lbankAdapter: ExchangeFundingAdapter = {
       // Keep only active instruments (status=2), otherwise stale symbols like PUFFER remain.
       if (String(row.instrumentStatus ?? "") !== "2") continue;
       if (row.fundingRate === undefined || row.fundingRate === null) continue;
+      const vol = Number(row.volume ?? 0);
+      if (!Number.isFinite(vol) || vol <= 0) continue;
 
       const base = (row.baseCurrency ?? row.symbol.replace(/USDT$/i, "")).toUpperCase();
       markets.push({

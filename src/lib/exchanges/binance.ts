@@ -15,6 +15,15 @@ type BinancePremium = {
   markPrice?: string;
 };
 
+type BinanceExchangeInfo = {
+  symbols: {
+    symbol: string;
+    status: string;
+    contractType: string;
+    quoteAsset: string;
+  }[];
+};
+
 function baseFromSymbol(symbol: string): string | null {
   if (!symbol.endsWith("USDT")) return null;
   const base = symbol.slice(0, -4);
@@ -26,18 +35,39 @@ export const binanceAdapter: ExchangeFundingAdapter = {
   slug: "binance" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
-    const rows = await fetchWithRetry(
-      () =>
-        fetchJson<BinancePremium[]>(
-          "https://fapi.binance.com/fapi/v1/premiumIndex",
-        ),
-      { retries: 2, baseDelayMs: 400 },
+    const [rows, exchangeInfo] = await Promise.all([
+      fetchWithRetry(
+        () =>
+          fetchJson<BinancePremium[]>(
+            "https://fapi.binance.com/fapi/v1/premiumIndex",
+          ),
+        { retries: 2, baseDelayMs: 400 },
+      ),
+      fetchWithRetry(
+        () =>
+          fetchJson<BinanceExchangeInfo>(
+            "https://fapi.binance.com/fapi/v1/exchangeInfo",
+          ),
+        { retries: 2, baseDelayMs: 400 },
+      ),
+    ]);
+
+    const tradable = new Set(
+      (exchangeInfo.symbols ?? [])
+        .filter(
+          (s) =>
+            s.status === "TRADING" &&
+            s.contractType === "PERPETUAL" &&
+            s.quoteAsset === "USDT",
+        )
+        .map((s) => s.symbol),
     );
 
     const markets: NormalizedMarket[] = [];
     const latest: LatestFunding[] = [];
 
     for (const row of rows) {
+      if (!tradable.has(row.symbol)) continue;
       const base = baseFromSymbol(row.symbol);
       if (!base) continue;
       markets.push({

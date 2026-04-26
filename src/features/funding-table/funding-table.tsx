@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronUp, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Star, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { FundingHistoryDialog } from "@/features/funding-table/funding-history-dialog";
 import { FundingCompareDialog } from "@/features/funding-table/funding-compare-dialog";
@@ -39,12 +39,37 @@ function ExchangeBadge({ slug }: { slug: ExchangeAdapterSlug }) {
 function CoinCell({
   base,
   onHide,
+  isSaved,
+  onToggleSaved,
 }: {
   base: string;
   onHide?: (base: string) => void;
+  isSaved?: boolean;
+  onToggleSaved?: (base: string) => void;
 }) {
   return (
     <span className="group/coin inline-flex items-center gap-1">
+      {onToggleSaved && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleSaved(base);
+          }}
+          className={cn(
+            "inline-flex size-5 shrink-0 items-center justify-center rounded transition-colors",
+            "text-muted-foreground/70 hover:bg-amber-500/15 hover:text-amber-600",
+            isSaved && "text-amber-600",
+          )}
+          aria-label={
+            isSaved ? `Убрать ${base} из сохранённых` : `Сохранить ${base}`
+          }
+        >
+          <Star
+            className={cn("size-3.5", isSaved && "fill-amber-400 text-amber-600")}
+          />
+        </button>
+      )}
       <span className="font-semibold tracking-wide">{base}</span>
       {onHide && (
         <button
@@ -102,11 +127,15 @@ export function FundingTableView({
   isLoading,
   error,
   onHideToken,
+  onToggleSaved,
+  savedBasesSet,
 }: {
   rows: FundingTableRow[];
   isLoading: boolean;
   error: string | null;
   onHideToken?: (base: string) => void;
+  onToggleSaved?: (base: string) => void;
+  savedBasesSet?: Set<string>;
 }) {
   const columnOrder = useFundingUiStore((s) => s.columnOrder);
   const columnVisibility = useFundingUiStore((s) => s.columnVisibility);
@@ -273,6 +302,8 @@ export function FundingTableView({
                         row={row}
                         onCellClick={handleCellClick}
                         onHideToken={onHideToken}
+                        onToggleSaved={onToggleSaved}
+                        savedBasesSet={savedBasesSet}
                         pendingExchange={
                           pendingBase === row.baseAsset
                             ? pendingExchange
@@ -314,6 +345,8 @@ function CellRenderer({
   row,
   onCellClick,
   onHideToken,
+  onToggleSaved,
+  savedBasesSet,
   pendingExchange,
 }: {
   col: ColumnId;
@@ -324,9 +357,19 @@ function CellRenderer({
     modifiers: { shiftKey: boolean; ctrlOrMetaKey: boolean },
   ) => void;
   onHideToken?: (base: string) => void;
+  onToggleSaved?: (base: string) => void;
+  savedBasesSet?: Set<string>;
   pendingExchange: ExchangeAdapterSlug | null;
 }) {
-  if (col === "coins") return <CoinCell base={row.baseAsset} onHide={onHideToken} />;
+  if (col === "coins")
+    return (
+      <CoinCell
+        base={row.baseAsset}
+        onHide={onHideToken}
+        isSaved={savedBasesSet?.has(row.baseAsset)}
+        onToggleSaved={onToggleSaved}
+      />
+    );
 
   if (col === "maxSpread") {
     const v = row.maxSpread;
@@ -339,15 +382,23 @@ function CellRenderer({
   const v = row.ratesByExchange[slug] ?? null;
   const label = EXCHANGE_LABELS[slug];
   const isSelected = slug === pendingExchange;
+  const spreadExtremes = row.maxSpreadSlugs ?? [];
+  const isSpreadExtreme = spreadExtremes.includes(slug);
   return (
     <button
       type="button"
       className={cn(
         "-mx-1 w-full min-w-[4.25rem] rounded-md px-1.5 py-1 text-left transition-colors",
         "hover:bg-muted/70 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
-        isSelected
-          ? "ring-2 ring-sky-400 bg-sky-50 dark:bg-sky-950/40 dark:ring-sky-600"
-          : "",
+        isSpreadExtreme &&
+          !isSelected &&
+          "bg-amber-500/12 shadow-[0_0_14px_rgba(245,158,11,0.35)] ring-1 ring-amber-500/55 dark:bg-amber-400/10 dark:shadow-[0_0_18px_rgba(251,191,36,0.22)] dark:ring-amber-400/45",
+        isSpreadExtreme &&
+          isSelected &&
+          "shadow-[0_0_12px_rgba(245,158,11,0.3)] ring-2 ring-sky-400 bg-sky-50 dark:bg-sky-950/40 dark:ring-sky-600",
+        isSelected &&
+          !isSpreadExtreme &&
+          "ring-2 ring-sky-400 bg-sky-50 dark:bg-sky-950/40 dark:ring-sky-600",
         fundingCellClass(v),
       )}
       onClick={(e) =>

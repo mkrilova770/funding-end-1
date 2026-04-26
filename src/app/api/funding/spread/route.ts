@@ -17,7 +17,8 @@ const KLINE_CACHE_MS = 10 * 60_000;
 const klineCache = new Map<string, { at: number; points: KlinePoint[] }>();
 
 const MAX_DAYS_FOR_INTERVAL: Record<IntervalMin, number> = {
-  5: 3,
+  /** 5м: больше дней — панорама по графику; запрос тяжелее, но укладывается в типичные лимиты kline */
+  5: 7,
   30: 14,
   60: 30,
   240: 90,
@@ -174,7 +175,12 @@ export async function GET(req: Request) {
   const supportsA = Boolean(adapterA.fetchKlines);
   const supportsB = Boolean(adapterB.fetchKlines);
 
-  let history: { time: number; spreadPct: number }[] = [];
+  let history: {
+    time: number;
+    spreadPct: number;
+    closeA: number;
+    closeB: number;
+  }[] = [];
 
   if (supportsA && supportsB) {
     try {
@@ -196,6 +202,8 @@ export async function GET(req: Request) {
           history.push({
             time: ka.time,
             spreadPct: ka.close > 0 ? ((cb - ka.close) / ka.close) * 100 : 0,
+            closeA: ka.close,
+            closeB: cb,
           });
         }
         history.sort((a, b) => a.time - b.time);

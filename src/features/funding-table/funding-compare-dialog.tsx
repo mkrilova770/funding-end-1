@@ -1,5 +1,6 @@
 "use client";
 
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -709,7 +710,7 @@ type SpreadPayload = {
   intervalMin: number;
   supportsKlinesA: boolean;
   supportsKlinesB: boolean;
-  history: { time: number; spreadPct: number }[];
+  history: { time: number; spreadPct: number; closeA: number; closeB: number }[];
 };
 
 function useSpreadData(
@@ -747,8 +748,27 @@ function useSpreadData(
 /*  Spread chart component                                            */
 /* ------------------------------------------------------------------ */
 
-type SpreadRow = { time: number; spreadPct: number };
+type SpreadRow = {
+  time: number;
+  spreadPct: number;
+  closeA?: number;
+  closeB?: number;
+};
 type SpreadPt = SpreadRow & { px: number; py: number; globalIdx: number };
+
+function nearestSpreadPtByPx(pts: SpreadPt[], px: number): SpreadPt | null {
+  if (!pts.length) return null;
+  let best = pts[0]!;
+  let bestD = Infinity;
+  for (const p of pts) {
+    const d = Math.abs(p.px - px);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  }
+  return best;
+}
 
 function buildSpreadLayout(
   rows: SpreadRow[],
@@ -844,10 +864,38 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
   const [viewStart, setViewStart] = useState(0);
   const [viewEnd, setViewEnd] = useState(1);
   const dragRef = useRef<{ active: boolean; lastX: number }>({ active: false, lastX: 0 });
+  const tapRef = useRef<{ x: number; y: number; moved: boolean } | null>(null);
+  const brushModeRef = useRef(false);
+  const brushLiveRef = useRef<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
+  const [brushSel, setBrushSel] = useState<{ sx: number; sy: number; ex: number; ey: number } | null>(null);
+  const [pinnedPt, setPinnedPt] = useState<SpreadPt | null>(null);
+  const [pointerDragging, setPointerDragging] = useState(false);
 
   const rows = useMemo(() => [...data.history].sort((a, b) => a.time - b.time), [data.history]);
 
-  useEffect(() => { setViewStart(0); setViewEnd(1); }, [data.history]);
+  /** Для 5м/30м/1ч данных много — по умолчанию показываем «хвост», панорамой смотрим раньше. */
+  useEffect(() => {
+    setPinnedPt(null);
+    const n = data.history.length;
+    if (n < 2) {
+      setViewStart(0);
+      setViewEnd(1);
+      return;
+    }
+    if (interval < 240) {
+      const targetBars =
+        interval === 5 ? 360 : interval === 30 ? 240 : 180;
+      if (n > targetBars) {
+        const startGi = Math.max(0, n - targetBars);
+        const startFrac = n <= 1 ? 0 : startGi / (n - 1);
+        setViewStart(Math.min(0.92, startFrac));
+        setViewEnd(1);
+        return;
+      }
+    }
+    setViewStart(0);
+    setViewEnd(1);
+  }, [data.history, interval]);
 
   const model = useMemo(
     () => buildSpreadLayout(rows, viewStart, viewEnd),
@@ -864,9 +912,32 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
     [],
   );
 
+  const panSpreadHorizontally = useCallback((dir: -1 | 1) => {
+    const w = viewEnd - viewStart;
+    if (w <= 0) return;
+    const step = Math.max(w * 0.18, 0.012);
+    let ns = viewStart + dir * step;
+    let ne = viewEnd + dir * step;
+    if (ns < 0) {
+      ne -= ns;
+      ns = 0;
+    }
+    if (ne > 1) {
+      ns -= ne - 1;
+      ne = 1;
+    }
+    setViewStart(ns);
+    setViewEnd(ne);
+  }, [viewStart, viewEnd]);
+
   const handleWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
+      if (e.shiftKey) {
+        const dir = e.deltaY > 0 ? (-1 as const) : (1 as const);
+        panSpreadHorizontally(dir);
+        return;
+      }
       const factor = e.deltaY > 0 ? 1.15 : 1 / 1.15;
       const mouseF = svgFracFromClient(e.clientX);
       const dataFrac = viewStart + mouseF * (viewEnd - viewStart);
@@ -879,7 +950,7 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
       setViewStart(clamp(ns, 0, 1));
       setViewEnd(clamp(ne, 0, 1));
     },
-    [viewStart, viewEnd, svgFracFromClient],
+    [viewStart, viewEnd, svgFracFromClient, panSpreadHorizontally],
   );
 
   useEffect(() => {
@@ -891,14 +962,47 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const brushKeys = e.ctrlKey || e.metaKey;
+    if (brushKeys) {
+      brushModeRef.current = true;
+      const p = clientToSvg(svg, e.clientX, e.clientY);
+      const init = { sx: p.x, sy: p.y, ex: p.x, ey: p.y };
+      brushLiveRef.current = init;
+      setBrushSel(init);
+      dragRef.current = { active: true, lastX: e.clientX };
+      tapRef.current = { x: e.clientX, y: e.clientY, moved: true };
+      setPointerDragging(true);
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      return;
+    }
+    brushModeRef.current = false;
     dragRef.current = { active: true, lastX: e.clientX };
+    tapRef.current = { x: e.clientX, y: e.clientY, moved: false };
+    setPointerDragging(true);
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   }, []);
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       setCursor({ x: e.clientX, y: e.clientY });
+      if (brushModeRef.current && svgRef.current) {
+        const p = clientToSvg(svgRef.current, e.clientX, e.clientY);
+        const b = brushLiveRef.current;
+        if (b) {
+          const next = { ...b, ex: p.x, ey: p.y };
+          brushLiveRef.current = next;
+          setBrushSel(next);
+        }
+        return;
+      }
       if (dragRef.current.active) {
+        if (tapRef.current) {
+          const dx = e.clientX - tapRef.current.x;
+          const dy = e.clientY - tapRef.current.y;
+          if (Math.abs(dx) > 6 || Math.abs(dy) > 6) tapRef.current.moved = true;
+        }
         const svg = svgRef.current;
         if (!svg) return;
         const rect = svg.getBoundingClientRect();
@@ -922,7 +1026,70 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
     [model, viewStart, viewEnd],
   );
 
-  const onPointerUp = useCallback(() => { dragRef.current.active = false; }, []);
+  const endPointer = useCallback((e?: React.PointerEvent) => {
+    if (brushModeRef.current) {
+      brushModeRef.current = false;
+      const b = brushLiveRef.current;
+      brushLiveRef.current = null;
+      setBrushSel(null);
+      tapRef.current = null;
+      dragRef.current.active = false;
+      setPointerDragging(false);
+      if (
+        e &&
+        e.button === 0 &&
+        b &&
+        viewEnd > viewStart &&
+        PLOT_W > 0
+      ) {
+        const xL = clamp(Math.min(b.sx, b.ex), VB.left, VB.left + PLOT_W);
+        const xR = clamp(Math.max(b.sx, b.ex), VB.left, VB.left + PLOT_W);
+        const pxW = Math.abs(xR - xL);
+        if (pxW >= 12) {
+          const wLen = viewEnd - viewStart;
+          const g0 = viewStart + ((xL - VB.left) / PLOT_W) * wLen;
+          const g1 = viewStart + ((xR - VB.left) / PLOT_W) * wLen;
+          let ns = clamp(Math.min(g0, g1), 0, 1);
+          let ne = clamp(Math.max(g0, g1), 0, 1);
+          if (ne - ns < MIN_WINDOW) {
+            const mid = (ns + ne) / 2;
+            ns = clamp(mid - MIN_WINDOW / 2, 0, 1 - MIN_WINDOW);
+            ne = ns + MIN_WINDOW;
+          }
+          if (ne > 1) {
+            ne = 1;
+            ns = clamp(1 - MIN_WINDOW, 0, 1);
+          }
+          setViewStart(ns);
+          setViewEnd(ne);
+        }
+      }
+      return;
+    }
+    const ptsNow = model?.pts;
+    if (
+      e &&
+      e.button === 0 &&
+      tapRef.current &&
+      !tapRef.current.moved &&
+      ptsNow &&
+      ptsNow.length > 0 &&
+      svgRef.current
+    ) {
+      const { x } = clientToSvg(svgRef.current, e.clientX, e.clientY);
+      const hit = nearestSpreadPtByPx(ptsNow, x);
+      if (hit) {
+        setPinnedPt((prev) =>
+          prev?.time === hit.time && prev.globalIdx === hit.globalIdx
+            ? null
+            : hit,
+        );
+      }
+    }
+    tapRef.current = null;
+    dragRef.current.active = false;
+    setPointerDragging(false);
+  }, [model, viewStart, viewEnd]);
   const resetZoom = useCallback(() => { setViewStart(0); setViewEnd(1); }, []);
 
   const fmtPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(4)}%`;
@@ -984,6 +1151,8 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
   const plotRight = VB.left + PLOT_W;
   const plotBottom = VB.top + PLOT_H;
   const isZoomed = viewStart > 0.001 || viewEnd < 0.999;
+  const canPanOlder = viewStart > 0.0005;
+  const canPanNewer = viewEnd < 0.9995;
 
   let hovPt: SpreadPt | null = null;
   if (hoverPx !== null && pts.length) {
@@ -996,10 +1165,12 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
     hovPt = best;
   }
 
+  const linePt = pointerDragging ? null : (pinnedPt ?? hovPt);
+
   const showDots = pts.length <= 120;
 
   const tooltipNode =
-    hovPt && !dragRef.current.active
+    hovPt && !pointerDragging
       ? createPortal(
           <div
             className="pointer-events-none fixed z-[99999] w-max max-w-[280px] rounded-lg border border-border/80 bg-popover px-3 py-2 text-xs text-popover-foreground shadow-xl"
@@ -1014,6 +1185,17 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
               <span className="text-muted-foreground">Спред:</span>
               <span className={cn("font-semibold tabular-nums", pctClass(hovPt.spreadPct))}>
                 {fmtPct(hovPt.spreadPct)}
+              </span>
+            </p>
+            <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 border-t border-border/60 pt-1.5 text-[11px]">
+              <span className="text-muted-foreground">Close {labelA}:</span>
+              <span className="font-medium tabular-nums text-foreground">
+                {fmtPrice(hovPt.closeA)}
+              </span>
+              <span className="text-muted-foreground">·</span>
+              <span className="text-muted-foreground">Close {labelB}:</span>
+              <span className="font-medium tabular-nums text-foreground">
+                {fmtPrice(hovPt.closeB)}
               </span>
             </p>
           </div>,
@@ -1113,10 +1295,17 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
       {/* Single-line chart: directional entry-like spread for selected side A -> B */}
       <div className="shrink-0 overflow-hidden rounded-xl border border-border/60 bg-card shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-2 px-5 py-4 sm:px-6 sm:py-5">
-          <span className="text-sm font-medium">
-            Спред входа (по close): {labelA} → {labelB}
-          </span>
-          <div className="flex items-center gap-1.5">
+          <div className="flex min-w-0 flex-col gap-0.5">
+            <span className="text-sm font-medium">
+              Спред входа (по close): {labelA} → {labelB}
+            </span>
+            <span className="text-[11px] text-muted-foreground">
+              Колёсико — зум по времени. Shift+колёсико или стрелки — сдвиг окна (раньше / позже). Перетаскивание —
+              панорама. Ctrl (или ⌘) + ЛКМ и выделение по горизонтали — зум на выбранный интервал. Наведение — close
+              обеих бирж и спред; клик — закрепить точку.
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5">
             {SPREAD_INTERVALS.map((iv) => (
               <button
                 key={iv.value}
@@ -1131,6 +1320,40 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
                 {iv.label}
               </button>
             ))}
+            <span
+              className="mx-0.5 hidden h-6 w-px bg-border sm:inline-block"
+              aria-hidden
+            />
+            <div className="flex items-center gap-0.5 rounded-md border border-border/80 bg-muted/30 p-0.5">
+              <button
+                type="button"
+                title="Раньше по времени"
+                disabled={!canPanOlder}
+                onClick={() => panSpreadHorizontally(-1)}
+                className={cn(
+                  "inline-flex size-8 items-center justify-center rounded-sm transition-colors",
+                  canPanOlder
+                    ? "text-foreground hover:bg-background"
+                    : "cursor-not-allowed text-muted-foreground/40",
+                )}
+              >
+                <ChevronLeft className="size-4" aria-hidden />
+              </button>
+              <button
+                type="button"
+                title="Позже по времени"
+                disabled={!canPanNewer}
+                onClick={() => panSpreadHorizontally(1)}
+                className={cn(
+                  "inline-flex size-8 items-center justify-center rounded-sm transition-colors",
+                  canPanNewer
+                    ? "text-foreground hover:bg-background"
+                    : "cursor-not-allowed text-muted-foreground/40",
+                )}
+              >
+                <ChevronRight className="size-4" aria-hidden />
+              </button>
+            </div>
             {isZoomed && (
               <button
                 onClick={resetZoom}
@@ -1147,11 +1370,23 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
             ref={svgRef}
             viewBox={`0 0 ${VB.w} ${VB.h}`}
             preserveAspectRatio="xMidYMid meet"
-            className={cn("h-auto w-full touch-none", dragRef.current.active ? "cursor-grabbing" : isZoomed ? "cursor-grab" : "cursor-crosshair")}
+            className={cn(
+              "h-auto w-full touch-none",
+              brushSel
+                ? "cursor-col-resize"
+                : pointerDragging
+                  ? "cursor-grabbing"
+                  : isZoomed
+                    ? "cursor-grab"
+                    : "cursor-crosshair",
+            )}
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerLeave={() => { onPointerUp(); setHoverPx(null); }}
+            onPointerUp={endPointer}
+            onPointerLeave={() => {
+              endPointer();
+              setHoverPx(null);
+            }}
             role="img"
             aria-label="График ценового спреда"
           >
@@ -1183,17 +1418,40 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
             ) : null}
 
             <g clipPath="url(#spread-clip)">
-              {hovPt && (
-                <line x1={hovPt.px} x2={hovPt.px} y1={VB.top} y2={plotBottom} stroke="rgba(148,163,184,0.25)" strokeWidth={1} />
+              {linePt && (
+                <line
+                  x1={linePt.px}
+                  x2={linePt.px}
+                  y1={VB.top}
+                  y2={plotBottom}
+                  stroke="rgba(148,163,184,0.25)"
+                  strokeWidth={1}
+                />
               )}
 
               <polyline fill="none" stroke={CHART_LINE} strokeWidth={1.8} strokeLinejoin="round" strokeLinecap="round" points={poly} />
 
-              {showDots && pts.map((p, i) => (
-                <circle key={i} cx={p.px} cy={p.py} r={hovPt === p ? 4.5 : 2.5} fill={CHART_DOT_FILL} stroke={CHART_DOT_STROKE} strokeWidth={1.2} />
-              ))}
-              {!showDots && hovPt && (
-                <circle cx={hovPt.px} cy={hovPt.py} r={4.5} fill={CHART_DOT_FILL} stroke={CHART_DOT_STROKE} strokeWidth={1.5} />
+              {showDots &&
+                pts.map((p, i) => (
+                  <circle
+                    key={i}
+                    cx={p.px}
+                    cy={p.py}
+                    r={linePt === p ? 4.5 : 2.5}
+                    fill={CHART_DOT_FILL}
+                    stroke={CHART_DOT_STROKE}
+                    strokeWidth={1.2}
+                  />
+                ))}
+              {!showDots && linePt && (
+                <circle
+                  cx={linePt.px}
+                  cy={linePt.py}
+                  r={4.5}
+                  fill={CHART_DOT_FILL}
+                  stroke={CHART_DOT_STROKE}
+                  strokeWidth={1.5}
+                />
               )}
             </g>
 
@@ -1207,6 +1465,19 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
                 </text>
               );
             })}
+
+            {brushSel ? (
+              <rect
+                x={Math.min(brushSel.sx, brushSel.ex)}
+                y={VB.top}
+                width={Math.max(1, Math.abs(brushSel.ex - brushSel.sx))}
+                height={PLOT_H}
+                fill="rgba(59,130,246,0.14)"
+                stroke="rgba(59,130,246,0.55)"
+                strokeWidth={1}
+                pointerEvents="none"
+              />
+            ) : null}
           </svg>
 
           {isZoomed && (
@@ -1214,6 +1485,52 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
               Скролл — зум · Перетащите — двигать
             </div>
           )}
+          {pinnedPt ? (
+            <div className="mx-2 mb-2 flex flex-col gap-2 rounded-lg border border-border/70 bg-muted/30 px-3 py-2 text-xs sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Выбрано на графике (ещё раз по точке — снять)
+                </p>
+                <p className="font-medium text-foreground">
+                  {new Date(pinnedPt.time).toLocaleString("ru-RU", {
+                    day: "2-digit",
+                    month: "long",
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}
+                </p>
+                <p className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                  <span className="text-muted-foreground">Спред:</span>
+                  <span
+                    className={cn("font-semibold tabular-nums", pctClass(pinnedPt.spreadPct))}
+                  >
+                    {fmtPct(pinnedPt.spreadPct)}
+                  </span>
+                </p>
+                <div className="grid gap-0.5 sm:grid-cols-2 sm:gap-x-4">
+                  <p>
+                    <span className="text-muted-foreground">Close {labelA}: </span>
+                    <span className="font-medium tabular-nums text-foreground">
+                      {fmtPrice(pinnedPt.closeA)}
+                    </span>
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">Close {labelB}: </span>
+                    <span className="font-medium tabular-nums text-foreground">
+                      {fmtPrice(pinnedPt.closeB)}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="shrink-0 self-end rounded-md border border-border/80 bg-background px-2 py-1 text-[11px] font-medium hover:bg-muted/60 sm:self-start"
+                onClick={() => setPinnedPt(null)}
+              >
+                Снять
+              </button>
+            </div>
+          ) : null}
           {tooltipNode}
         </div>
       </div>

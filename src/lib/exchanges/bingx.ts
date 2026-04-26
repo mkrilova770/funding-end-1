@@ -16,6 +16,13 @@ type BingxPremiumRow = {
   markPrice?: string;
 };
 
+type BingxContractRow = {
+  symbol: string;
+  /** 1 = tradable in samples */
+  status?: number;
+  apiStateOpen?: string | boolean;
+};
+
 function baseFromSymbol(symbol: string): string | null {
   if (!symbol.endsWith("-USDT")) return null;
   const base = symbol.slice(0, -"-USDT".length);
@@ -26,22 +33,51 @@ export const bingxAdapter: ExchangeFundingAdapter = {
   slug: "bingx" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
-    const premium = await fetchWithRetry(
-      () =>
-        fetchJson<BingxResp<BingxPremiumRow[]>>(
-          "https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex",
-          { timeoutMs: 25_000 },
-        ),
-      { retries: 2, baseDelayMs: 400 },
-    );
+    const [premium, contractsRes] = await Promise.all([
+      fetchWithRetry(
+        () =>
+          fetchJson<BingxResp<BingxPremiumRow[]>>(
+            "https://open-api.bingx.com/openApi/swap/v2/quote/premiumIndex",
+            { timeoutMs: 25_000 },
+          ),
+        { retries: 2, baseDelayMs: 400 },
+      ),
+      fetchWithRetry(
+        () =>
+          fetchJson<BingxResp<BingxContractRow[]>>(
+            "https://open-api.bingx.com/openApi/swap/v2/quote/contracts",
+            { timeoutMs: 20_000 },
+          ),
+        { retries: 1, baseDelayMs: 350 },
+      ).catch(() => null),
+    ]);
     if (premium.code !== 0) {
       throw new Error(`BingX premiumIndex: ${premium.msg}`);
+    }
+
+    let openPerpUsdt: Set<string> | null = null;
+    if (
+      contractsRes &&
+      contractsRes.code === 0 &&
+      Array.isArray(contractsRes.data)
+    ) {
+      openPerpUsdt = new Set();
+      for (const c of contractsRes.data) {
+        const open =
+          c.apiStateOpen === true ||
+          c.apiStateOpen === "true" ||
+          c.apiStateOpen === "1";
+        if (open && (c.status === undefined || c.status === 1)) {
+          openPerpUsdt.add(c.symbol);
+        }
+      }
     }
 
     const markets: NormalizedMarket[] = [];
     const latest: LatestFunding[] = [];
 
     for (const row of premium.data ?? []) {
+      if (openPerpUsdt && !openPerpUsdt.has(row.symbol)) continue;
       const base = baseFromSymbol(row.symbol);
       if (!base) continue;
       const rate = row.lastFundingRate;

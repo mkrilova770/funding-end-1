@@ -23,6 +23,23 @@ type BybitTickersResp = {
   result: { category: string; list: BybitTicker[]; nextPageCursor?: string };
 };
 
+type BybitInstrumentRow = {
+  symbol: string;
+  contractType: string;
+  status: string;
+  quoteCoin: string;
+};
+
+type BybitInstrumentsResp = {
+  retCode: number;
+  retMsg: string;
+  result: {
+    category: string;
+    list: BybitInstrumentRow[];
+    nextPageCursor?: string;
+  };
+};
+
 type BybitFundingHistoryResp = {
   retCode: number;
   retMsg: string;
@@ -72,15 +89,56 @@ async function fetchAllLinearUsdtTickers(): Promise<BybitTicker[]> {
   return all;
 }
 
+/** USDT linear perpetuals that are open for trading (excludes settled / pre-launch noise in tickers). */
+async function fetchTradableLinearUsdtSymbols(): Promise<Set<string>> {
+  const out = new Set<string>();
+  let cursor: string | undefined = undefined;
+
+  for (let page = 0; page < 50; page++) {
+    const url = new URL("https://api.bybit.com/v5/market/instruments-info");
+    url.searchParams.set("category", "linear");
+    url.searchParams.set("limit", "1000");
+    if (cursor) url.searchParams.set("cursor", cursor);
+
+    const data = await fetchWithRetry(
+      () => fetchJson<BybitInstrumentsResp>(url.toString()),
+      { retries: 2, baseDelayMs: 400 },
+    );
+    if (data.retCode !== 0) {
+      throw new Error(`Bybit instruments-info: ${data.retMsg}`);
+    }
+    const list = data.result.list ?? [];
+    for (const row of list) {
+      if (
+        row.status === "Trading" &&
+        row.contractType === "LinearPerpetual" &&
+        row.quoteCoin === "USDT" &&
+        row.symbol.endsWith("USDT") &&
+        !row.symbol.includes("-")
+      ) {
+        out.add(row.symbol);
+      }
+    }
+    cursor = data.result.nextPageCursor;
+    if (!cursor || list.length === 0) break;
+  }
+
+  return out;
+}
+
 export const bybitAdapter: ExchangeFundingAdapter = {
   slug: "bybit" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
-    const tickers = await fetchAllLinearUsdtTickers();
+    const [tickers, tradable] = await Promise.all([
+      fetchAllLinearUsdtTickers(),
+      fetchTradableLinearUsdtSymbols(),
+    ]);
     const markets: NormalizedMarket[] = [];
     const latest: LatestFunding[] = [];
 
     for (const t of tickers) {
+      if (!tradable.has(t.symbol)) continue;
       const base = baseFromLinearUsdt(t.symbol);
       if (!base) continue;
       if (t.fundingRate === undefined) continue;

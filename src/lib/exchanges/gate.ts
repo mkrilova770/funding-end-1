@@ -18,6 +18,11 @@ type GateTicker = {
   lowest_ask?: string;
 };
 
+type GateContractMeta = {
+  name: string;
+  in_delisting: boolean;
+};
+
 function baseFromContract(contract: string): string | null {
   if (!contract.endsWith("_USDT")) return null;
   const base = contract.slice(0, -"_USDT".length);
@@ -28,18 +33,34 @@ export const gateAdapter: ExchangeFundingAdapter = {
   slug: "gate" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
-    const rows = await fetchWithRetry(
-      () =>
-        fetchJson<GateTicker[]>(
-          "https://api.gateio.ws/api/v4/futures/usdt/tickers",
-        ),
-      { retries: 2, baseDelayMs: 400 },
+    const [rows, contracts] = await Promise.all([
+      fetchWithRetry(
+        () =>
+          fetchJson<GateTicker[]>(
+            "https://api.gateio.ws/api/v4/futures/usdt/tickers",
+          ),
+        { retries: 2, baseDelayMs: 400 },
+      ),
+      fetchWithRetry(
+        () =>
+          fetchJson<GateContractMeta[]>(
+            "https://api.gateio.ws/api/v4/futures/usdt/contracts",
+          ),
+        { retries: 2, baseDelayMs: 400 },
+      ),
+    ]);
+
+    const delisting = new Set(
+      (contracts ?? [])
+        .filter((c) => c.in_delisting)
+        .map((c) => c.name),
     );
 
     const markets: NormalizedMarket[] = [];
     const latest: LatestFunding[] = [];
 
     for (const row of rows) {
+      if (delisting.has(row.contract)) continue;
       const base = baseFromContract(row.contract);
       if (!base) continue;
       const rate = row.funding_rate ?? row.funding_rate_indicative;

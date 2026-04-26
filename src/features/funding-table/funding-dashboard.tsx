@@ -5,10 +5,14 @@ import { useMemo } from "react";
 import { ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
 import type { FundingPeriod } from "@/lib/services/funding-table";
 import type { FundingPeriodUi } from "@/features/funding-table/funding-ui-store";
-import { useFundingUiStore } from "@/features/funding-table/funding-ui-store";
+import {
+  getOrderedSavedBases,
+  useFundingUiStore,
+} from "@/features/funding-table/funding-ui-store";
 import { EmptyDataHint } from "@/features/funding-table/empty-data-hint";
 import { FundingControls } from "@/features/funding-table/funding-controls";
 import { FundingTableView } from "@/features/funding-table/funding-table";
+import { SavedTokensWorkspace } from "@/features/funding-table/saved-tokens-workspace";
 import { TrashBinDialog } from "@/features/funding-table/trash-bin-dialog";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -29,12 +33,29 @@ export function FundingDashboard() {
   const sortDirection = useFundingUiStore((s) => s.sortDirection);
   const hiddenTokens = useFundingUiStore((s) => s.hiddenTokens);
   const hideToken = useFundingUiStore((s) => s.hideToken);
+  const dashboardMainTab = useFundingUiStore((s) => s.dashboardMainTab);
+  const savedFolders = useFundingUiStore((s) => s.savedFolders);
+  const savedTokens = useFundingUiStore((s) => s.savedTokens);
+  const toggleSavedToken = useFundingUiStore((s) => s.toggleSavedToken);
 
   const hiddenSet = useMemo(() => new Set(hiddenTokens), [hiddenTokens]);
+
+  const orderedSavedBases = useMemo(
+    () => getOrderedSavedBases(savedFolders, savedTokens),
+    [savedFolders, savedTokens],
+  );
+
+  const savedBasesSet = useMemo(
+    () => new Set(savedTokens.map((t) => t.base)),
+    [savedTokens],
+  );
 
   const visibleExchanges = useMemo(() => {
     return ALL_EXCHANGE_SLUGS.filter((slug) => columnVisibility[slug] !== false);
   }, [columnVisibility]);
+
+  const savedQueryEnabled =
+    dashboardMainTab === "all" || orderedSavedBases.length > 0;
 
   const query = useQuery({
     queryKey: [
@@ -46,16 +67,28 @@ export function FundingDashboard() {
       visibleExchanges.join("|"),
       sortColumn,
       sortDirection,
+      dashboardMainTab,
+      dashboardMainTab === "saved" ? orderedSavedBases.join(",") : "",
     ],
+    enabled: savedQueryEnabled,
     staleTime: period === "now" ? 42_000 : 120_000,
     placeholderData: keepPreviousData,
     refetchOnWindowFocus: false,
     queryFn: async () => {
       const params = new URLSearchParams();
       params.set("period", mapPeriod(period));
-      params.set("page", String(page));
-      params.set("pageSize", String(pageSize));
-      if (search.trim()) params.set("q", search.trim());
+      if (dashboardMainTab === "saved" && orderedSavedBases.length > 0) {
+        params.set("page", "1");
+        params.set(
+          "pageSize",
+          String(Math.min(500, Math.max(orderedSavedBases.length, 5))),
+        );
+        params.set("bases", orderedSavedBases.join(","));
+      } else {
+        params.set("page", String(page));
+        params.set("pageSize", String(pageSize));
+        if (search.trim()) params.set("q", search.trim());
+      }
       params.set("visible", visibleExchanges.join(","));
       params.set("sort", sortColumn);
       params.set("dir", sortDirection);
@@ -79,17 +112,44 @@ export function FundingDashboard() {
   });
 
   const filteredRows = useMemo(() => {
-    const rows = query.data?.rows ?? [];
+    let rows = query.data?.rows ?? [];
+    if (
+      dashboardMainTab === "saved" &&
+      orderedSavedBases.length > 0 &&
+      rows.length > 0
+    ) {
+      const m = new Map(rows.map((r) => [r.baseAsset, r]));
+      rows = orderedSavedBases
+        .map((b) => m.get(b))
+        .filter((r): r is NonNullable<typeof r> => r != null);
+    }
     if (hiddenSet.size === 0) return rows;
     return rows.filter((r) => !hiddenSet.has(r.baseAsset));
-  }, [query.data?.rows, hiddenSet]);
+  }, [
+    query.data?.rows,
+    hiddenSet,
+    dashboardMainTab,
+    orderedSavedBases,
+  ]);
 
-  const filteredTotal = (query.data?.total ?? 0) - hiddenSet.size;
+  const searchNeedle = search.trim().toLowerCase();
+  const displayRows = useMemo(() => {
+    if (!searchNeedle || dashboardMainTab === "all") return filteredRows;
+    return filteredRows.filter((r) =>
+      r.baseAsset.toLowerCase().includes(searchNeedle),
+    );
+  }, [filteredRows, searchNeedle, dashboardMainTab]);
 
-  const totalPages = Math.max(
-    1,
-    Math.ceil(filteredTotal / (query.data?.pageSize ?? pageSize)),
-  );
+  const filteredTotal =
+    dashboardMainTab === "saved"
+      ? displayRows.length
+      : Math.max(0, (query.data?.total ?? 0) - hiddenSet.size);
+
+  const effectivePageSize = query.data?.pageSize ?? pageSize;
+  const totalPages =
+    dashboardMainTab === "saved"
+      ? 1
+      : Math.max(1, Math.ceil(filteredTotal / effectivePageSize));
 
   const pages = useMemo(() => {
     const cur = query.data?.page ?? page;
@@ -133,7 +193,18 @@ export function FundingDashboard() {
 
       <FundingControls />
 
-      {!query.isLoading && query.isSuccess ? (
+      {dashboardMainTab === "saved" && orderedSavedBases.length > 0 ? (
+        <SavedTokensWorkspace />
+      ) : null}
+
+      {dashboardMainTab === "saved" && orderedSavedBases.length === 0 ? (
+        <div className="rounded-lg border border-dashed bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+          В «Сохранённых» пока пусто. На вкладке «Все монеты» нажмите звёздочку у тикера, чтобы добавить
+          монету сюда, затем настройте папки и порядок на этой вкладке.
+        </div>
+      ) : null}
+
+      {!query.isLoading && query.isSuccess && dashboardMainTab === "all" ? (
         <EmptyDataHint
           period={period}
           total={query.data.total}
@@ -142,54 +213,62 @@ export function FundingDashboard() {
         />
       ) : null}
 
-      <FundingTableView
-        rows={filteredRows}
-        isLoading={query.isLoading}
-        error={query.error ? (query.error as Error).message : null}
-        onHideToken={hideToken}
-      />
+      {(dashboardMainTab === "all" || orderedSavedBases.length > 0) && (
+        <FundingTableView
+          rows={displayRows}
+          isLoading={savedQueryEnabled && query.isLoading}
+          error={query.error ? (query.error as Error).message : null}
+          onHideToken={hideToken}
+          onToggleSaved={toggleSavedToken}
+          savedBasesSet={savedBasesSet}
+        />
+      )}
       <TrashBinDialog />
 
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-xs text-muted-foreground">
-          Всего монет: {filteredTotal}
+          {dashboardMainTab === "saved"
+            ? `Сохранённых: ${orderedSavedBases.length} · в таблице: ${displayRows.length}`
+            : `Всего монет: ${filteredTotal}`}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={page <= 1 || query.isFetching}
-            onClick={() => setPage(page - 1)}
-          >
-            Назад
-          </Button>
-
-          {pages.map((p) => (
+        {dashboardMainTab === "all" ? (
+          <div className="flex flex-wrap items-center gap-2">
             <Button
-              key={p}
               type="button"
-              variant={p === (query.data?.page ?? page) ? "default" : "outline"}
+              variant="outline"
               size="sm"
-              className="min-w-9"
-              disabled={query.isFetching}
-              onClick={() => setPage(p)}
+              disabled={page <= 1 || query.isFetching}
+              onClick={() => setPage(page - 1)}
             >
-              {p}
+              Назад
             </Button>
-          ))}
 
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={page >= totalPages || query.isFetching}
-            onClick={() => setPage(page + 1)}
-          >
-            Вперёд
-          </Button>
-        </div>
+            {pages.map((p) => (
+              <Button
+                key={p}
+                type="button"
+                variant={p === (query.data?.page ?? page) ? "default" : "outline"}
+                size="sm"
+                className="min-w-9"
+                disabled={query.isFetching}
+                onClick={() => setPage(p)}
+              >
+                {p}
+              </Button>
+            ))}
+
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={page >= totalPages || query.isFetching}
+              onClick={() => setPage(page + 1)}
+            >
+              Вперёд
+            </Button>
+          </div>
+        ) : null}
       </div>
     </div>
   );

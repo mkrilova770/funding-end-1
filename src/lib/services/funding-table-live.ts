@@ -1,27 +1,13 @@
 import { EXCHANGE_ADAPTERS, ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
 import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
 import {
+  computeSpreadMeta,
   sortFundingTableRows,
   type FundingTableRow,
   type FundingTableResult,
   type FundingTableSortDir,
   type FundingTableSortKey,
 } from "@/lib/services/funding-table";
-
-function computeMaxSpread(
-  rates: Partial<Record<ExchangeAdapterSlug, number | null>>,
-  visible: ExchangeAdapterSlug[],
-): number | null {
-  const vals: number[] = [];
-  for (const slug of visible) {
-    const v = rates[slug];
-    if (v === null || v === undefined) continue;
-    if (!Number.isFinite(v)) continue;
-    vals.push(v);
-  }
-  if (vals.length < 2) return null;
-  return Math.max(...vals) - Math.min(...vals);
-}
 
 function toNumber(rate: string): number {
   return Number(rate);
@@ -138,9 +124,11 @@ async function ensureNowCache(
 
   const built = bases.map((base) => {
     const rates = ratesByBase.get(base) ?? {};
+    const { maxSpread, maxSpreadSlugs } = computeSpreadMeta(rates, visible);
     return {
       baseAsset: base,
-      maxSpread: computeMaxSpread(rates, visible),
+      maxSpread,
+      maxSpreadSlugs,
       ratesByExchange: rates,
     };
   });
@@ -196,6 +184,8 @@ export async function getLiveFundingTableNow(opts: {
   visibleExchanges: ExchangeAdapterSlug[];
   sortBy: FundingTableSortKey;
   sortDir: FundingTableSortDir;
+  /** Если задано — только эти baseAsset (после сортировки), для вкладки «Сохранённые». */
+  basesFilter?: string[];
 }): Promise<FundingTableResult> {
   const visible =
     opts.visibleExchanges.length > 0
@@ -203,14 +193,22 @@ export async function getLiveFundingTableNow(opts: {
       : [...ALL_EXCHANGE_SLUGS];
 
   const cached = await ensureNowCache(visible, opts.q);
-  const sorted = sortFundingTableRows(
+  let sorted = sortFundingTableRows(
     cached.built,
     opts.sortBy,
     opts.sortDir,
   );
 
+  if (opts.basesFilter?.length) {
+    const want = new Set(
+      opts.basesFilter.map((b) => b.trim().toUpperCase()).filter(Boolean),
+    );
+    sorted = sorted.filter((r) => want.has(r.baseAsset));
+  }
+
   const page = Math.max(1, opts.page);
-  const pageSize = Math.min(200, Math.max(5, opts.pageSize));
+  const pageCap = opts.basesFilter?.length ? 500 : 200;
+  const pageSize = Math.min(pageCap, Math.max(5, opts.pageSize));
   const total = sorted.length;
   const start = (page - 1) * pageSize;
   const rows = sorted.slice(start, start + pageSize);
@@ -336,9 +334,14 @@ async function ensurePeriodFullCache(
 
   const built: FundingTableRow[] = nowCached.built.map((row) => {
     const periodRates = sumsByBase.get(row.baseAsset) ?? {};
+    const { maxSpread, maxSpreadSlugs } = computeSpreadMeta(
+      periodRates,
+      visible,
+    );
     return {
       baseAsset: row.baseAsset,
-      maxSpread: computeMaxSpread(periodRates, visible),
+      maxSpread,
+      maxSpreadSlugs,
       ratesByExchange: periodRates,
     };
   });
@@ -356,6 +359,7 @@ export async function getLiveFundingTablePeriod(opts: {
   visibleExchanges: ExchangeAdapterSlug[];
   sortBy: FundingTableSortKey;
   sortDir: FundingTableSortDir;
+  basesFilter?: string[];
 }): Promise<FundingTableResult> {
   const visible =
     opts.visibleExchanges.length > 0
@@ -365,14 +369,22 @@ export async function getLiveFundingTablePeriod(opts: {
 
   const periodCached = await ensurePeriodFullCache(visible, opts.q, days);
 
-  const sorted = sortFundingTableRows(
+  let sorted = sortFundingTableRows(
     periodCached.built,
     opts.sortBy,
     opts.sortDir,
   );
 
+  if (opts.basesFilter?.length) {
+    const want = new Set(
+      opts.basesFilter.map((b) => b.trim().toUpperCase()).filter(Boolean),
+    );
+    sorted = sorted.filter((r) => want.has(r.baseAsset));
+  }
+
   const page = Math.max(1, opts.page);
-  const pageSize = Math.min(200, Math.max(5, opts.pageSize));
+  const pageCap = opts.basesFilter?.length ? 500 : 200;
+  const pageSize = Math.min(pageCap, Math.max(5, opts.pageSize));
   const total = sorted.length;
   const start = (page - 1) * pageSize;
   const rows = sorted.slice(start, start + pageSize);

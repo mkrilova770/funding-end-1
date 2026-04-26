@@ -70,6 +70,8 @@ export type FundingTableRow = {
   baseAsset: string;
   /** Доля (не проценты): 0.0001 = 0.01%) */
   maxSpread: number | null;
+  /** До двух бирж: одна с макс. ставкой, одна с мин. (при ничьей — первая по порядку колонок). */
+  maxSpreadSlugs: ExchangeAdapterSlug[];
   ratesByExchange: Partial<Record<ExchangeAdapterSlug, number | null>>;
 };
 
@@ -103,19 +105,44 @@ function toNumber(rate: unknown): number {
   return Number(rate as never);
 }
 
-function computeMaxSpread(
+/**
+ * Макс. спред по видимым биржам и ровно две биржи для подсветки: одна с макс. ставкой, одна с мин.
+ * При ничьей на экстремуме берётся первая по порядку колонок в `visible`.
+ */
+export function computeSpreadMeta(
   rates: Partial<Record<ExchangeAdapterSlug, number | null>>,
   visible: ExchangeAdapterSlug[],
-): number | null {
-  const vals: number[] = [];
+): { maxSpread: number | null; maxSpreadSlugs: ExchangeAdapterSlug[] } {
+  const entries: { slug: ExchangeAdapterSlug; v: number }[] = [];
   for (const slug of visible) {
     const v = rates[slug];
     if (v === null || v === undefined) continue;
     if (!Number.isFinite(v)) continue;
-    vals.push(v);
+    entries.push({ slug, v });
   }
-  if (vals.length < 2) return null;
-  return Math.max(...vals) - Math.min(...vals);
+  if (entries.length < 2) {
+    return { maxSpread: null, maxSpreadSlugs: [] };
+  }
+  const values = entries.map((e) => e.v);
+  const hi = Math.max(...values);
+  const lo = Math.min(...values);
+  const maxSpread = hi - lo;
+  if (maxSpread <= 0) {
+    return { maxSpread: 0, maxSpreadSlugs: [] };
+  }
+  let hiSlug: ExchangeAdapterSlug | null = null;
+  let loSlug: ExchangeAdapterSlug | null = null;
+  for (const slug of visible) {
+    const v = rates[slug];
+    if (v === null || v === undefined || !Number.isFinite(v)) continue;
+    if (v === hi && hiSlug === null) hiSlug = slug;
+    if (v === lo && loSlug === null) loSlug = slug;
+    if (hiSlug !== null && loSlug !== null) break;
+  }
+  const maxSpreadSlugs: ExchangeAdapterSlug[] = [];
+  if (hiSlug !== null) maxSpreadSlugs.push(hiSlug);
+  if (loSlug !== null && loSlug !== hiSlug) maxSpreadSlugs.push(loSlug);
+  return { maxSpread, maxSpreadSlugs };
 }
 
 export async function getFundingTable(
@@ -238,8 +265,8 @@ export async function getFundingTable(
 
   const built: FundingTableRow[] = bases.map((base) => {
     const rates = ratesByBase.get(base) ?? {};
-    const maxSpread = computeMaxSpread(rates, visible);
-    return { baseAsset: base, maxSpread, ratesByExchange: rates };
+    const { maxSpread, maxSpreadSlugs } = computeSpreadMeta(rates, visible);
+    return { baseAsset: base, maxSpread, maxSpreadSlugs, ratesByExchange: rates };
   });
 
   const sorted = sortFundingTableRows(built, opts.sortBy, opts.sortDir);

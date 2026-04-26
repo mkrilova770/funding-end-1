@@ -30,10 +30,24 @@ function parsePeriod(raw: string | null): FundingPeriod {
   return "now";
 }
 
+/** Список тикеров для фильтрации строк (вкладка «Сохранённые»). */
+function parseBases(raw: string | null): string[] | undefined {
+  if (!raw?.trim()) return undefined;
+  const re = /^[A-Z0-9]{1,32}$/;
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => re.test(s));
+  return parts.length ? [...new Set(parts)] : undefined;
+}
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const period = parsePeriod(url.searchParams.get("period"));
-  const q = url.searchParams.get("q") ?? undefined;
+  const basesFilter = parseBases(url.searchParams.get("bases"));
+  const qRaw = (url.searchParams.get("q") ?? "").trim();
+  /** С `bases` грузим полный рынок без поиска, затем фильтруем по списку тикеров. */
+  const q = basesFilter?.length ? undefined : qRaw || undefined;
   const page = Number(url.searchParams.get("page") ?? "1");
   const pageSize = Number(url.searchParams.get("pageSize") ?? "50");
   const visible = parseVisible(url.searchParams.get("visible"));
@@ -62,6 +76,7 @@ export async function GET(req: Request) {
         visibleExchanges: opts.visibleExchanges,
         sortBy: opts.sortBy,
         sortDir: opts.sortDir,
+        basesFilter,
       });
       return json(
         data,
@@ -77,6 +92,7 @@ export async function GET(req: Request) {
       visibleExchanges: opts.visibleExchanges,
       sortBy: opts.sortBy,
       sortDir: opts.sortDir,
+      basesFilter,
     });
     return json(
       data,
