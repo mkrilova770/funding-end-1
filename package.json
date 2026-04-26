@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "prisma generate && next build",
-    "start": "next start",
+    "start": "prisma db push && next start",
     "lint": "eslint",
     "postinstall": "prisma generate",
     "db:push": "prisma db push",
@@ -14,7 +14,7 @@
     "db:seed": "prisma db seed",
     "db:studio": "prisma studio",
     "worker:dev": "tsx worker/entry.ts",
-    "worker": "tsx worker/entry.ts",
+    "worker": "prisma db push && tsx worker/entry.ts",
     "sync:once": "tsx scripts/sync-once.ts",
     "notify:telegram": "tsx scripts/telegram-spread-digest.ts"
   },

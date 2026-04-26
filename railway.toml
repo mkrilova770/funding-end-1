@@ -1,4 +1,0 @@
-# https://docs.railway.com/guides/config-as-code
-# Перед каждым деплоем подтягиваем схему Prisma (в т.ч. таблица TelegramDigestConfig).
-[deploy]
-preDeployCommand = ["npm run db:push"]
