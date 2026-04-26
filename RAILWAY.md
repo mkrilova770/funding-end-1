@@ -22,9 +22,24 @@ railway run --service <имя-web-или-worker> npx prisma db push
 
 ---
 
-## Variables (Railway → Project → выбранный сервис → **Variables**)
+## Variables (Railway → сервис → **Variables**)
 
-Задайте те же имена, что в `.env.example`. Для **Web** и **Worker** скопируйте значения (или используйте **Shared Variables** / Reference между сервисами).
+Railway **не подтягивает** переменные из `RAILWAY.md` или только из коммита автоматически. Нужно один раз добавить их в UI.
+
+### Способ A — импорт из репозитория
+
+1. Открой **Variables** у сервиса (Web и отдельно Worker).  
+2. Найди блок **Suggested variables** / предложение импортировать из GitHub (если есть).  
+3. Railway сканирует корень репозитория на файлы **`.env.*`** — в проекте добавлен **`/.env.railway`** со списком имён и значениями по умолчанию (без секретов).  
+4. Подтверди импорт, затем **заполни пустые** `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+
+### Способ B — RAW Editor
+
+1. **Variables** → **RAW Editor**.  
+2. Вставь содержимое файла **`.env.railway`** из репозитория.  
+3. Подставь реальные значения для `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` → **Save** / задеплой изменения.
+
+Для **Web** и **Worker** скопируйте одни и те же критичные переменные (или **Shared Variables** / Reference).
 
 | Name | Обязательно | Описание |
 |------|-------------|----------|
