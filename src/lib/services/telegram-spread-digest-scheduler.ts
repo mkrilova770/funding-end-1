@@ -5,6 +5,10 @@ import {
 } from "@/lib/services/telegram-digest-config";
 import { sendTelegramSpreadDigest } from "@/lib/services/telegram-spread-digest";
 
+type SchedulerGlobal = typeof globalThis & {
+  __telegramDigestSchedulerStarted?: boolean;
+};
+
 function getMskParts(d: Date): {
   y: number;
   mo: number;
@@ -53,6 +57,9 @@ function matchesConfiguredSlot(
  * Нужны TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID. Расписание и порог — из настроек на сайте (Prisma).
  */
 export function maybeStartTelegramSpreadDigestScheduler(): void {
+  const g = globalThis as SchedulerGlobal;
+  if (g.__telegramDigestSchedulerStarted) return;
+
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
   if (!token || !chatId) {
@@ -92,6 +99,7 @@ export function maybeStartTelegramSpreadDigestScheduler(): void {
 
   void tick();
   setInterval(() => void tick(), 30_000);
+  g.__telegramDigestSchedulerStarted = true;
   console.log(
     "[telegram-digest] планировщик активен (слоты и порог из БД / настроек на сайте)",
   );

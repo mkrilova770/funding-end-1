@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -19,6 +20,8 @@ type KuCoinContract = {
   predictedFundingFeeRate?: number | null;
   nextFundingRateDateTime?: number | null;
   markPrice?: number | null;
+  /** Интервал в миллисекундах (часто 28_800_000 = 8 ч). */
+  fundingRateGranularity?: number | null;
 };
 
 function normalizeBase(base: string): string {
@@ -59,6 +62,14 @@ export const kucoinAdapter: ExchangeFundingAdapter = {
         continue;
       }
 
+      const gran = c.fundingRateGranularity;
+      const fundingIntervalHours =
+        gran != null &&
+        Number.isFinite(Number(gran)) &&
+        Number(gran) > 0
+          ? normalizeStandardFundingIntervalHours(Number(gran) / 3_600_000)
+          : null;
+
       markets.push({
         nativeSymbol: c.symbol,
         baseAsset: normalizeBase(c.baseCurrency),
@@ -72,6 +83,7 @@ export const kucoinAdapter: ExchangeFundingAdapter = {
             ? new Date(c.nextFundingRateDateTime)
             : null,
         markPrice: c.markPrice != null ? String(c.markPrice) : undefined,
+        fundingIntervalHours,
       });
     }
 

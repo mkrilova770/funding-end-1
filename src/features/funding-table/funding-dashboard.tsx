@@ -1,10 +1,25 @@
 "use client";
 
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 import { ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
-import type { FundingPeriod } from "@/lib/services/funding-table";
-import type { FundingPeriodUi } from "@/features/funding-table/funding-ui-store";
+import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
+import {
+  emptyFundingTableRow,
+  sortFundingTableRows,
+  withPinnedMajorsFirst,
+  type FundingPeriod,
+  type FundingTableSortDir,
+  type FundingTableSortKey,
+} from "@/lib/services/funding-table";
+import type {
+  DashboardMainTab,
+  FundingPeriodUi,
+} from "@/features/funding-table/funding-ui-store";
 import {
   getOrderedSavedBases,
   useFundingUiStore,
@@ -22,13 +37,83 @@ function mapPeriod(p: FundingPeriodUi): FundingPeriod {
   return p;
 }
 
+type FundingTablePayload = {
+  updatedAt: string | null;
+  total: number;
+  page: number;
+  pageSize: number;
+  rows: import("@/lib/services/funding-table").FundingTableRow[];
+  meta: {
+    exchangeCount: number;
+    marketCount: number;
+    live?: boolean;
+    needsHistoryDb?: boolean;
+    fullList?: boolean;
+  };
+};
+
+async function fetchFundingTablePayload(input: {
+  period: FundingPeriod;
+  page: number;
+  pageSize: number;
+  search: string;
+  /** Список slug через запятую для query `visible=` (только запятая — см. parseVisible на сервере). */
+  visibleParam: string;
+  sortColumn: FundingTableSortKey;
+  sortDirection: FundingTableSortDir;
+  dashboardMainTab: DashboardMainTab;
+  orderedSavedBases: string[];
+}): Promise<FundingTablePayload> {
+  const params = new URLSearchParams();
+  params.set("period", input.period);
+  const nowFullList = input.period === "now";
+  if (nowFullList) params.set("full", "1");
+  if (
+    input.dashboardMainTab === "saved" &&
+    input.orderedSavedBases.length > 0
+  ) {
+    params.set("page", "1");
+    params.set(
+      "pageSize",
+      String(Math.min(500, Math.max(input.orderedSavedBases.length, 5))),
+    );
+    params.set("bases", input.orderedSavedBases.join(","));
+  } else {
+    params.set("page", nowFullList ? "1" : String(input.page));
+    params.set(
+      "pageSize",
+      nowFullList ? "5000" : String(input.pageSize),
+    );
+    if (input.search.trim()) params.set("q", input.search.trim());
+  }
+  params.set("visible", input.visibleParam);
+  if (!nowFullList) {
+    params.set("sort", input.sortColumn);
+    params.set("dir", input.sortDirection);
+  } else if (input.dashboardMainTab === "all") {
+    /** Сервер при full=1 не сортирует; передаём дефолт для совместимости логов/кэша. */
+    params.set("sort", "maxSpread");
+    params.set("dir", "desc");
+  }
+  const res = await fetch(`/api/funding/table?${params.toString()}`);
+  if (!res.ok) {
+    const hint = await res.text().catch(() => "");
+    throw new Error(
+      `Не удалось загрузить данные (HTTP ${res.status})${hint ? `: ${hint.slice(0, 160)}` : ""}`,
+    );
+  }
+  return (await res.json()) as FundingTablePayload;
+}
+
 export function FundingDashboard() {
+  const queryClient = useQueryClient();
   const period = useFundingUiStore((s) => s.period);
   const page = useFundingUiStore((s) => s.page);
   const pageSize = useFundingUiStore((s) => s.pageSize);
   const search = useFundingUiStore((s) => s.search);
   const columnVisibility = useFundingUiStore((s) => s.columnVisibility);
   const setPage = useFundingUiStore((s) => s.setPage);
+  const setSortColumn = useFundingUiStore((s) => s.setSortColumn);
 
   const sortColumn = useFundingUiStore((s) => s.sortColumn);
   const sortDirection = useFundingUiStore((s) => s.sortDirection);
@@ -58,71 +143,89 @@ export function FundingDashboard() {
   const savedQueryEnabled =
     dashboardMainTab === "all" || orderedSavedBases.length > 0;
 
+  const savedBasesKey =
+    dashboardMainTab === "saved" ? orderedSavedBases.join(",") : "";
+  const visibleParam = visibleExchanges.join(",");
+
+  /** Сортировка по колонке скрытой биржи даёт пустые значения — сбрасываем на «Макс. спред». */
+  useEffect(() => {
+    if (
+      sortColumn === "coins" ||
+      sortColumn === "maxSpread" ||
+      sortColumn === "maxFunding" ||
+      sortColumn === "minFunding"
+    ) {
+      return;
+    }
+    if (!visibleExchanges.includes(sortColumn as ExchangeAdapterSlug)) {
+      setSortColumn("maxSpread");
+    }
+  }, [sortColumn, visibleExchanges, setSortColumn]);
+
+  /** Не грузим тяжёлые период-агрегации при первом заходе: это тормозит открытие главной страницы. */
+  useEffect(() => {
+    if (period !== "now" || !savedQueryEnabled) return;
+    return;
+  }, [
+    period,
+    savedQueryEnabled,
+  ]);
+
+  const liveNowShortQueryKey = period === "now";
+
   const query = useQuery({
-    queryKey: [
-      "funding-table",
-      period,
-      page,
-      pageSize,
-      search,
-      visibleExchanges.join("|"),
-      sortColumn,
-      sortDirection,
-      dashboardMainTab,
-      dashboardMainTab === "saved" ? orderedSavedBases.join(",") : "",
-    ],
+    queryKey: liveNowShortQueryKey
+      ? [
+          "funding-table",
+          period,
+          pageSize,
+          search,
+          visibleParam,
+          dashboardMainTab,
+          savedBasesKey,
+        ]
+      : [
+          "funding-table",
+          period,
+          page,
+          pageSize,
+          search,
+          visibleParam,
+          sortColumn,
+          sortDirection,
+          dashboardMainTab,
+          savedBasesKey,
+        ],
     enabled: savedQueryEnabled,
-    staleTime: period === "now" ? 42_000 : 120_000,
+    staleTime: period === "now" ? 55_000 : 5 * 60_000,
     placeholderData: keepPreviousData,
     refetchOnWindowFocus: false,
-    queryFn: async () => {
-      const params = new URLSearchParams();
-      params.set("period", mapPeriod(period));
-      if (dashboardMainTab === "saved" && orderedSavedBases.length > 0) {
-        params.set("page", "1");
-        params.set(
-          "pageSize",
-          String(Math.min(500, Math.max(orderedSavedBases.length, 5))),
-        );
-        params.set("bases", orderedSavedBases.join(","));
-      } else {
-        params.set("page", String(page));
-        params.set("pageSize", String(pageSize));
-        if (search.trim()) params.set("q", search.trim());
-      }
-      params.set("visible", visibleExchanges.join(","));
-      params.set("sort", sortColumn);
-      params.set("dir", sortDirection);
-      const res = await fetch(`/api/funding/table?${params.toString()}`);
-      if (!res.ok) throw new Error("Не удалось загрузить данные");
-      return (await res.json()) as {
-        updatedAt: string | null;
-        total: number;
-        page: number;
-        pageSize: number;
-        rows: import("@/lib/services/funding-table").FundingTableRow[];
-        meta: {
-          exchangeCount: number;
-          marketCount: number;
-          live?: boolean;
-          needsHistoryDb?: boolean;
-        };
-      };
-    },
+    retry: period === "now" ? 0 : 1,
+    retryDelay: 4000,
+    queryFn: () =>
+      fetchFundingTablePayload({
+        period: mapPeriod(period),
+        page,
+        pageSize,
+        search,
+        visibleParam,
+        sortColumn,
+        sortDirection,
+        dashboardMainTab,
+        orderedSavedBases,
+      }),
     refetchInterval: period === "now" ? 50_000 : 180_000,
   });
 
   const filteredRows = useMemo(() => {
     let rows = query.data?.rows ?? [];
-    if (
-      dashboardMainTab === "saved" &&
-      orderedSavedBases.length > 0 &&
-      rows.length > 0
-    ) {
+    if (dashboardMainTab === "saved" && orderedSavedBases.length > 0) {
       const m = new Map(rows.map((r) => [r.baseAsset, r]));
-      rows = orderedSavedBases
-        .map((b) => m.get(b))
-        .filter((r): r is NonNullable<typeof r> => r != null);
+      rows = orderedSavedBases.map((b) => {
+        const hit = m.get(b);
+        if (hit) return hit;
+        return emptyFundingTableRow(b, visibleExchanges);
+      });
     }
     if (hiddenSet.size === 0) return rows;
     return rows.filter((r) => !hiddenSet.has(r.baseAsset));
@@ -131,29 +234,69 @@ export function FundingDashboard() {
     hiddenSet,
     dashboardMainTab,
     orderedSavedBases,
+    visibleExchanges,
   ]);
 
   const searchNeedle = search.trim().toLowerCase();
-  const displayRows = useMemo(() => {
-    if (!searchNeedle || dashboardMainTab === "all") return filteredRows;
+  const searchFilteredRows = useMemo(() => {
+    if (!searchNeedle) return filteredRows;
     return filteredRows.filter((r) =>
       r.baseAsset.toLowerCase().includes(searchNeedle),
     );
-  }, [filteredRows, searchNeedle, dashboardMainTab]);
+  }, [filteredRows, searchNeedle]);
+
+  const clientSortedRows = useMemo(() => {
+    if (period !== "now" || dashboardMainTab !== "all") {
+      return searchFilteredRows;
+    }
+    const q = search.trim() || undefined;
+    return sortFundingTableRows(
+      withPinnedMajorsFirst(searchFilteredRows, { q }),
+      sortColumn,
+      sortDirection,
+    );
+  }, [
+    period,
+    dashboardMainTab,
+    searchFilteredRows,
+    sortColumn,
+    sortDirection,
+    search,
+  ]);
+
+  const tableRows = useMemo(() => {
+    if (period !== "now" || dashboardMainTab !== "all") {
+      return searchFilteredRows;
+    }
+    const start = (page - 1) * pageSize;
+    return clientSortedRows.slice(start, start + pageSize);
+  }, [
+    period,
+    dashboardMainTab,
+    searchFilteredRows,
+    clientSortedRows,
+    page,
+    pageSize,
+  ]);
 
   const filteredTotal =
     dashboardMainTab === "saved"
-      ? displayRows.length
-      : Math.max(0, (query.data?.total ?? 0) - hiddenSet.size);
+      ? searchFilteredRows.length
+      : period === "now" && dashboardMainTab === "all"
+        ? searchFilteredRows.length
+        : Math.max(0, (query.data?.total ?? 0) - hiddenSet.size);
 
-  const effectivePageSize = query.data?.pageSize ?? pageSize;
+  const effectivePageSize =
+    period === "now" && dashboardMainTab === "all"
+      ? pageSize
+      : (query.data?.pageSize ?? pageSize);
   const totalPages =
     dashboardMainTab === "saved"
       ? 1
       : Math.max(1, Math.ceil(filteredTotal / effectivePageSize));
 
   const pages = useMemo(() => {
-    const cur = query.data?.page ?? page;
+    const cur = page;
     const windowSize = 5;
     const start = Math.max(1, cur - Math.floor(windowSize / 2));
     const end = Math.min(totalPages, start + windowSize - 1);
@@ -161,10 +304,21 @@ export function FundingDashboard() {
     const out: number[] = [];
     for (let i = s2; i <= end; i++) out.push(i);
     return out;
-  }, [query.data?.page, page, totalPages]);
+  }, [page, totalPages]);
+
+  useEffect(() => {
+    if (dashboardMainTab !== "all") return;
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages, setPage, dashboardMainTab]);
+
+  /**
+   * Только серверный total: иначе при «Сейчас» + fullList после скрытия всех видимых
+   * строк searchFilteredRows.length === 0 при живом ответе API — ложное «ни с одной биржи».
+   */
+  const emptyHintTotal = query.data?.total ?? 0;
 
   return (
-    <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4 px-4 py-6">
+    <div className="flex w-full min-w-0 flex-col gap-4 px-2 py-6 sm:px-4 lg:px-6">
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-4">
           <h1 className="text-2xl font-semibold tracking-tight">
@@ -211,7 +365,7 @@ export function FundingDashboard() {
       {!query.isLoading && query.isSuccess && dashboardMainTab === "all" ? (
         <EmptyDataHint
           period={period}
-          total={query.data.total}
+          total={emptyHintTotal}
           meta={query.data.meta}
           hasSearch={Boolean(search.trim())}
         />
@@ -219,7 +373,7 @@ export function FundingDashboard() {
 
       {(dashboardMainTab === "all" || orderedSavedBases.length > 0) && (
         <FundingTableView
-          rows={displayRows}
+          rows={tableRows}
           isLoading={savedQueryEnabled && query.isLoading}
           error={query.error ? (query.error as Error).message : null}
           onHideToken={hideToken}
@@ -232,7 +386,7 @@ export function FundingDashboard() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="text-xs text-muted-foreground">
           {dashboardMainTab === "saved"
-            ? `Сохранённых: ${orderedSavedBases.length} · в таблице: ${displayRows.length}`
+            ? `Сохранённых: ${orderedSavedBases.length} · в таблице: ${searchFilteredRows.length}`
             : `Всего монет: ${filteredTotal}`}
         </div>
 
@@ -252,7 +406,7 @@ export function FundingDashboard() {
               <Button
                 key={p}
                 type="button"
-                variant={p === (query.data?.page ?? page) ? "default" : "outline"}
+                variant={p === page ? "default" : "outline"}
                 size="sm"
                 className="min-w-9"
                 disabled={query.isFetching}

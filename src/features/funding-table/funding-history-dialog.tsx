@@ -37,6 +37,8 @@ import {
   clamp,
   computeFundingSums,
   computeLatestRate,
+  clientXToGlobalFrac,
+  sumFundingForGlobalFracWindow,
   VB,
   PLOT_W,
   PLOT_H,
@@ -66,6 +68,17 @@ function FundingReferenceChart({
   const [viewStart, setViewStart] = useState(0);
   const [viewEnd, setViewEnd] = useState(1);
   const dragRef = useRef<{ active: boolean; lastX: number }>({ active: false, lastX: 0 });
+  /** Выделение по оси времени [0,1] по всему ряду (не зависит от зума после фиксации). */
+  const [brushFracs, setBrushFracs] = useState<{ lo: number; hi: number } | null>(null);
+  const [brushDragFracs, setBrushDragFracs] = useState<{ lo: number; hi: number } | null>(
+    null,
+  );
+  const brushDragRef = useRef<{
+    pointerId: number;
+    startFrac: number;
+    lo: number;
+    hi: number;
+  } | null>(null);
 
   const allRows = useMemo(() => prepareRows(points), [points]);
 
@@ -73,6 +86,12 @@ function FundingReferenceChart({
     setViewStart(0);
     setViewEnd(1);
   }, [points]);
+
+  useEffect(() => {
+    setBrushFracs(null);
+    setBrushDragFracs(null);
+    brushDragRef.current = null;
+  }, [viewStart, viewEnd]);
 
   const model = useMemo(
     () => buildLayout(allRows, viewStart, viewEnd),
@@ -117,15 +136,46 @@ function FundingReferenceChart({
     return () => el.removeEventListener("wheel", handleWheel);
   }, [handleWheel]);
 
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    dragRef.current = { active: true, lastX: e.clientX };
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-  }, []);
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      const svg = svgRef.current;
+      if (e.ctrlKey && svg) {
+        e.preventDefault();
+        const f = clientXToGlobalFrac(svg, e.clientX, viewStart, viewEnd);
+        brushDragRef.current = { pointerId: e.pointerId, startFrac: f, lo: f, hi: f };
+        setBrushDragFracs({ lo: f, hi: f });
+        setBrushFracs(null);
+        setHoverIdx(null);
+        dragRef.current.active = false;
+        svg.setPointerCapture(e.pointerId);
+        return;
+      }
+      dragRef.current = { active: true, lastX: e.clientX };
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    },
+    [viewStart, viewEnd],
+  );
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       setCursor({ x: e.clientX, y: e.clientY });
+
+      const br = brushDragRef.current;
+      if (br && e.pointerId === br.pointerId && svgRef.current) {
+        const f = clientXToGlobalFrac(
+          svgRef.current,
+          e.clientX,
+          viewStart,
+          viewEnd,
+        );
+        const lo = Math.min(br.startFrac, f);
+        const hi = Math.max(br.startFrac, f);
+        brushDragRef.current = { ...br, lo, hi };
+        setBrushDragFracs({ lo, hi });
+        setHoverIdx(null);
+        return;
+      }
 
       if (dragRef.current.active) {
         const svg = svgRef.current;
@@ -160,14 +210,59 @@ function FundingReferenceChart({
     [model, viewStart, viewEnd],
   );
 
-  const onPointerUp = useCallback(() => {
-    dragRef.current.active = false;
+  const commitBrushRange = useCallback(
+    (lo: number, hi: number) => {
+      setBrushDragFracs(null);
+      const agg = sumFundingForGlobalFracWindow(allRows, lo, hi);
+      if (agg && agg.count > 0) setBrushFracs({ lo, hi });
+      else setBrushFracs(null);
+    },
+    [allRows],
+  );
+
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const br = brushDragRef.current;
+      if (br && e.pointerId === br.pointerId && svgRef.current) {
+        const svg = svgRef.current;
+        try {
+          svg.releasePointerCapture(e.pointerId);
+        } catch {
+          /* ignore */
+        }
+        brushDragRef.current = null;
+        const f = clientXToGlobalFrac(svg, e.clientX, viewStart, viewEnd);
+        const lo = Math.min(br.startFrac, f);
+        const hi = Math.max(br.startFrac, f);
+        commitBrushRange(lo, hi);
+        return;
+      }
+      dragRef.current.active = false;
+    },
+    [commitBrushRange, viewStart, viewEnd],
+  );
+
+  const clearBrush = useCallback(() => {
+    setBrushFracs(null);
+    setBrushDragFracs(null);
+    brushDragRef.current = null;
   }, []);
 
   const resetZoom = useCallback(() => {
     setViewStart(0);
     setViewEnd(1);
-  }, []);
+    clearBrush();
+  }, [clearBrush]);
+
+  const brushActiveFracs = brushDragFracs ?? brushFracs;
+  const brushSum = useMemo(() => {
+    if (!brushActiveFracs) return null;
+    return sumFundingForGlobalFracWindow(
+      allRows,
+      brushActiveFracs.lo,
+      brushActiveFracs.hi,
+    );
+  }, [allRows, brushActiveFracs]);
 
   if (!model || allRows.length < 2) {
     return (
@@ -185,8 +280,25 @@ function FundingReferenceChart({
 
   const showDots = layoutPts.length <= 120;
 
+  const fracToPlotX = (f: number) =>
+    VB.left + ((f - startFrac) / windowLen) * PLOT_W;
+
+  let brushRect: { x: number; width: number } | null = null;
+  if (brushActiveFracs && windowLen > 1e-12) {
+    const visLo = Math.max(brushActiveFracs.lo, startFrac);
+    const visHi = Math.min(brushActiveFracs.hi, startFrac + windowLen);
+    if (visLo < visHi - 1e-12) {
+      const x1 = fracToPlotX(visLo);
+      const x2 = fracToPlotX(visHi);
+      brushRect = {
+        x: Math.min(x1, x2),
+        width: Math.abs(x2 - x1),
+      };
+    }
+  }
+
   const tooltipNode =
-    hov && !dragRef.current.active
+    hov && !dragRef.current.active && !brushDragFracs
       ? createPortal(
           <div
             className="pointer-events-none fixed z-[99999] w-max max-w-[260px] rounded-lg border border-border/80 bg-popover px-3 py-2 text-xs text-popover-foreground shadow-xl"
@@ -211,7 +323,8 @@ function FundingReferenceChart({
 
   return (
     <div className="shrink-0 overflow-hidden rounded-xl border border-border/60 bg-card shadow-sm">
-      <div className="flex items-center justify-between px-5 py-4 sm:px-6 sm:py-5">
+        <div className="flex flex-col gap-3 px-5 py-4 sm:px-6 sm:py-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
         <p className="text-sm font-medium text-foreground sm:text-base">
           Ставка финансирования:{" "}
           <span
@@ -236,6 +349,11 @@ function FundingReferenceChart({
             Последние {rangeDays}Д
           </span>
         </div>
+        <p className="text-xs text-muted-foreground">
+          <kbd className="rounded border bg-muted px-1 py-0.5 font-mono text-[10px]">Ctrl</kbd>
+          {" + протащите по графику — сумма фандинга за выделенный период"}
+        </p>
+        </div>
       </div>
 
       <div ref={wrapRef} className="relative select-none px-1 pb-3 sm:px-2 sm:pb-4">
@@ -243,11 +361,37 @@ function FundingReferenceChart({
           ref={svgRef}
           viewBox={`0 0 ${VB.w} ${VB.h}`}
           preserveAspectRatio="xMidYMid meet"
-          className={cn("h-auto w-full touch-none", dragRef.current.active ? "cursor-grabbing" : isZoomed ? "cursor-grab" : "cursor-crosshair")}
+          className={cn(
+            "h-auto w-full touch-none",
+            brushDragFracs
+              ? "cursor-col-resize"
+              : dragRef.current.active
+                ? "cursor-grabbing"
+                : isZoomed
+                  ? "cursor-grab"
+                  : "cursor-crosshair",
+          )}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerLeave={() => { onPointerUp(); setHoverIdx(null); }}
+          onPointerCancel={onPointerUp}
+          onPointerLeave={(e) => {
+            const br = brushDragRef.current;
+            if (br && e.pointerId === br.pointerId && svgRef.current) {
+              try {
+                svgRef.current.releasePointerCapture(e.pointerId);
+              } catch {
+                /* ignore */
+              }
+              brushDragRef.current = null;
+              commitBrushRange(br.lo, br.hi);
+            }
+            dragRef.current.active = false;
+            setHoverIdx(null);
+          }}
+          onContextMenu={(e) => {
+            if (e.ctrlKey) e.preventDefault();
+          }}
           role="img"
           aria-label="График ставки финансирования"
         >
@@ -279,6 +423,18 @@ function FundingReferenceChart({
           ) : null}
 
           <g clipPath="url(#plot-clip)">
+            {brushRect && brushRect.width > 0.5 ? (
+              <rect
+                x={brushRect.x}
+                y={VB.top}
+                width={brushRect.width}
+                height={PLOT_H}
+                fill="rgba(59, 130, 246, 0.14)"
+                stroke="rgba(59, 130, 246, 0.55)"
+                strokeWidth={1}
+                pointerEvents="none"
+              />
+            ) : null}
             {hov ? (
               <line x1={hov.px} x2={hov.px} y1={VB.top} y2={plotBottom} stroke="rgba(34,197,94,0.18)" strokeWidth={1} />
             ) : null}
@@ -316,9 +472,52 @@ function FundingReferenceChart({
           })}
         </svg>
 
+        {brushSum && brushSum.count > 0 ? (
+          <div className="mx-2 mb-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3 dark:bg-sky-950/35">
+            <div className="min-w-0 text-xs sm:text-sm">
+              <p className="font-semibold text-foreground">Сумма за выделение</p>
+              <p className="mt-1 text-muted-foreground tabular-nums">
+                {new Date(brushSum.fromTime).toLocaleString("ru-RU", {
+                  day: "2-digit",
+                  month: "short",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+                {" — "}
+                {new Date(brushSum.toTime).toLocaleString("ru-RU", {
+                  day: "2-digit",
+                  month: "short",
+                  year: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </p>
+              <p className="mt-1 text-muted-foreground">Событий: {brushSum.count}</p>
+            </div>
+            <div className="flex shrink-0 flex-col items-end gap-2">
+              <span
+                className={cn(
+                  "text-lg font-bold tabular-nums sm:text-xl",
+                  fundingCellClass(brushSum.sum),
+                )}
+              >
+                {formatFundingPercentSigned(brushSum.sum, 5)}
+              </span>
+              <button
+                type="button"
+                onClick={clearBrush}
+                className="rounded-md border border-border/80 bg-background px-2.5 py-1 text-xs font-medium text-foreground/85 hover:bg-muted/50"
+              >
+                Сбросить выделение
+              </button>
+            </div>
+          </div>
+        ) : null}
+
         {isZoomed && (
           <div className="absolute bottom-5 left-1/2 -translate-x-1/2 rounded-full bg-muted/70 px-3 py-1 text-[10px] text-muted-foreground backdrop-blur sm:bottom-6">
-            Скролл — зум · Перетащите — двигать
+            Скролл — зум · Перетащите — двигать · Ctrl — сумма за период
           </div>
         )}
 
@@ -357,7 +556,9 @@ export function FundingHistoryDialog({
       return (await res.json()) as HistoryPayload;
     },
     staleTime: 5 * 60_000,
+    gcTime: 15 * 60_000,
     refetchOnWindowFocus: false,
+    refetchOnReconnect: true,
   });
 
   const latestRate = useMemo(

@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -17,6 +18,8 @@ type LbankMarketRow = {
   instrumentStatus?: string | number;
   /** 24h volume; delisted instruments often stay status "2" with zero volume */
   volume?: string | number;
+  /** Секунды между начислениями фандинга (3600 = 1 ч, …). */
+  positionFeeTime?: number;
 };
 
 type LbankMarketDataResp = {
@@ -84,12 +87,20 @@ export const lbankAdapter: ExchangeFundingAdapter = {
         quoteAsset: "USDT",
       });
       const lp = row.lastPrice != null ? String(row.lastPrice) : undefined;
+      const feeSec = row.positionFeeTime;
+      const fundingIntervalHours =
+        feeSec != null &&
+        Number.isFinite(Number(feeSec)) &&
+        Number(feeSec) > 0
+          ? normalizeStandardFundingIntervalHours(Number(feeSec) / 3600)
+          : null;
       latest.push({
         nativeSymbol: row.symbol,
         rate: String(row.fundingRate),
         nextFundingTime: null,
         bestBid: lp,
         bestAsk: lp,
+        fundingIntervalHours,
       });
     }
 

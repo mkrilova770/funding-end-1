@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -21,6 +22,8 @@ type GateTicker = {
 type GateContractMeta = {
   name: string;
   in_delisting: boolean;
+  /** Секунды между начислениями. */
+  funding_interval?: number;
 };
 
 function baseFromContract(contract: string): string | null {
@@ -56,6 +59,17 @@ export const gateAdapter: ExchangeFundingAdapter = {
         .map((c) => c.name),
     );
 
+    const fundingSecByContract = new Map<string, number>();
+    for (const c of contracts ?? []) {
+      if (
+        !c.in_delisting &&
+        typeof c.funding_interval === "number" &&
+        c.funding_interval > 0
+      ) {
+        fundingSecByContract.set(c.name, c.funding_interval);
+      }
+    }
+
     const markets: NormalizedMarket[] = [];
     const latest: LatestFunding[] = [];
 
@@ -65,6 +79,11 @@ export const gateAdapter: ExchangeFundingAdapter = {
       if (!base) continue;
       const rate = row.funding_rate ?? row.funding_rate_indicative;
       if (!rate) continue;
+      const sec = fundingSecByContract.get(row.contract);
+      const fundingIntervalHours =
+        sec !== undefined
+          ? normalizeStandardFundingIntervalHours(sec / 3600)
+          : null;
       markets.push({
         nativeSymbol: row.contract,
         baseAsset: base,
@@ -77,6 +96,7 @@ export const gateAdapter: ExchangeFundingAdapter = {
         markPrice: row.mark_price,
         bestBid: row.highest_bid,
         bestAsk: row.lowest_ask,
+        fundingIntervalHours,
       });
     }
 

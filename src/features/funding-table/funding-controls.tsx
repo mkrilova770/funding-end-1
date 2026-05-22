@@ -1,6 +1,6 @@
 "use client";
 
-import { Search, Star, Trash2 } from "lucide-react";
+import { ArrowUpWideNarrow, Search, Star, Trash2 } from "lucide-react";
 import { ColumnSettingsDialog } from "@/features/funding-table/column-settings-dialog";
 import {
   type DashboardMainTab,
@@ -20,6 +20,9 @@ export function FundingControls() {
   const dashboardMainTab = useFundingUiStore((s) => s.dashboardMainTab);
   const setDashboardMainTab = useFundingUiStore((s) => s.setDashboardMainTab);
   const savedCount = useFundingUiStore((s) => s.savedTokens.length);
+  const setSort = useFundingUiStore((s) => s.setSort);
+  const sortColumn = useFundingUiStore((s) => s.sortColumn);
+  const sortDirection = useFundingUiStore((s) => s.sortDirection);
 
   return (
     <div className="flex flex-col gap-3">
@@ -64,10 +67,31 @@ export function FundingControls() {
         >
           <TabsList>
             <TabsTrigger value="now">Сейчас</TabsTrigger>
+            <TabsTrigger value="day">1 день</TabsTrigger>
+            <TabsTrigger value="threeDays">3 дня</TabsTrigger>
             <TabsTrigger value="week">Неделя</TabsTrigger>
             <TabsTrigger value="month">Месяц</TabsTrigger>
           </TabsList>
         </Tabs>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => {
+            const isPositiveMode =
+              sortColumn === "maxFunding" && sortDirection === "desc";
+            if (isPositiveMode) {
+              setSort("minFunding", "asc");
+              return;
+            }
+            setSort("maxFunding", "desc");
+          }}
+          className="gap-1.5"
+          title="Клик: максимальный положительный фандинг; повторный клик: максимальный отрицательный"
+        >
+          <ArrowUpWideNarrow className="size-4" />
+          Макс. фандинг
+        </Button>
 
         {hiddenCount > 0 && (
           <Button

@@ -100,6 +100,10 @@ model TelegramDigestConfig {
   maxSpreadThreshold   Float    @default(0.0025)
   /// JSON массив строк "HH:MM" по Europe/Moscow
   mskSlotsJson         String   @default("[\"22:30\",\"02:30\",\"06:30\",\"10:30\",\"14:30\",\"18:30\"]")
+  /// JSON массив slug бирж для дайджеста; пусто = все биржи
+  exchangesJson        String   @default("[]")
+  /// Режим отбора: maxSpread | maxFunding
+  metric               String   @default("maxSpread")
   enabled              Boolean  @default(false)
   updatedAt            DateTime @updatedAt
 }

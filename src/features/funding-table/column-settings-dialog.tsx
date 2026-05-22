@@ -114,6 +114,8 @@ export function ColumnSettingsDialog() {
   const setOpen = useFundingUiStore((s) => s.setSettingsOpen);
   const order = useFundingUiStore((s) => s.columnOrder);
   const reorder = useFundingUiStore((s) => s.reorderColumns);
+  const showAllExchanges = useFundingUiStore((s) => s.showAllExchangeColumns);
+  const hideAllExchanges = useFundingUiStore((s) => s.hideAllExchangeColumns);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -148,6 +150,27 @@ export function ColumnSettingsDialog() {
           <p className="text-sm text-muted-foreground">
             Перетащите строки, чтобы изменить порядок колонок и видимость бирж.
           </p>
+
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="text-xs sm:text-sm"
+              onClick={() => showAllExchanges()}
+            >
+              Включить все биржи
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="text-xs sm:text-sm"
+              onClick={() => hideAllExchanges()}
+            >
+              Скрыть все биржи
+            </Button>
+          </div>
 
           <DndContext
             sensors={sensors}

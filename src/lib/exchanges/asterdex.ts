@@ -9,14 +9,17 @@ import type {
   NormalizedMarket,
 } from "@/lib/exchanges/types";
 
-type BinancePremium = {
+/** Binance-совместимый USDⓈ-M futures API Aster DEX. */
+const API_ROOT = "https://fapi.asterdex.com";
+
+type AsterPremium = {
   symbol: string;
   lastFundingRate: string;
   nextFundingTime?: string;
   markPrice?: string;
 };
 
-type BinanceExchangeInfo = {
+type AsterExchangeInfo = {
   symbols: {
     symbol: string;
     status: string;
@@ -25,7 +28,7 @@ type BinanceExchangeInfo = {
   }[];
 };
 
-type BinanceFundingInfoRow = {
+type AsterFundingInfoRow = {
   symbol: string;
   fundingIntervalHours?: number;
 };
@@ -37,30 +40,24 @@ function baseFromSymbol(symbol: string): string | null {
   return base.toUpperCase();
 }
 
-export const binanceAdapter: ExchangeFundingAdapter = {
-  slug: "binance" as ExchangeAdapterSlug,
+export const asterdexAdapter: ExchangeFundingAdapter = {
+  slug: "asterdex" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
     const [rows, exchangeInfo, fundingInfo] = await Promise.all([
       fetchWithRetry(
         () =>
-          fetchJson<BinancePremium[]>(
-            "https://fapi.binance.com/fapi/v1/premiumIndex",
-          ),
+          fetchJson<AsterPremium[]>(`${API_ROOT}/fapi/v1/premiumIndex`),
         { retries: 2, baseDelayMs: 400 },
       ),
       fetchWithRetry(
         () =>
-          fetchJson<BinanceExchangeInfo>(
-            "https://fapi.binance.com/fapi/v1/exchangeInfo",
-          ),
+          fetchJson<AsterExchangeInfo>(`${API_ROOT}/fapi/v1/exchangeInfo`),
         { retries: 2, baseDelayMs: 400 },
       ),
       fetchWithRetry(
         () =>
-          fetchJson<BinanceFundingInfoRow[]>(
-            "https://fapi.binance.com/fapi/v1/fundingInfo",
-          ),
+          fetchJson<AsterFundingInfoRow[]>(`${API_ROOT}/fapi/v1/fundingInfo`),
         { retries: 2, baseDelayMs: 400 },
       ),
     ]);
@@ -112,7 +109,7 @@ export const binanceAdapter: ExchangeFundingAdapter = {
       const bookTickers = await fetchWithRetry(
         () =>
           fetchJson<{ symbol: string; bidPrice: string; askPrice: string }[]>(
-            "https://fapi.binance.com/fapi/v1/ticker/bookTicker",
+            `${API_ROOT}/fapi/v1/ticker/bookTicker`,
           ),
         { retries: 1, baseDelayMs: 300 },
       );
@@ -126,7 +123,9 @@ export const binanceAdapter: ExchangeFundingAdapter = {
           l.bestAsk = bt.ask;
         }
       }
-    } catch { /* bookTicker is optional */ }
+    } catch {
+      /* bookTicker is optional */
+    }
 
     return { markets, latest };
   },
@@ -137,9 +136,8 @@ export const binanceAdapter: ExchangeFundingAdapter = {
     let startTime = range.since.getTime();
     const end = range.until.getTime();
 
-    // Binance: funding каждые 8ч — 1000 точек покрывают >330 дней; всё равно двигаем окно на случай лимита
     while (startTime < end) {
-      const url = new URL("https://fapi.binance.com/fapi/v1/fundingRate");
+      const url = new URL(`${API_ROOT}/fapi/v1/fundingRate`);
       url.searchParams.set("symbol", nativeSymbol);
       url.searchParams.set("startTime", String(startTime));
       url.searchParams.set("endTime", String(end));
@@ -163,7 +161,7 @@ export const binanceAdapter: ExchangeFundingAdapter = {
         });
       }
 
-      const last = chunk[chunk.length - 1];
+      const last = chunk[chunk.length - 1]!;
       const nextStart = last.fundingTime + 1;
       if (nextStart <= startTime) break;
       startTime = nextStart;
@@ -174,14 +172,20 @@ export const binanceAdapter: ExchangeFundingAdapter = {
   },
 
   async fetchKlines(nativeSymbol, range, intervalMin = 240) {
-    const intervalMap: Record<number, string> = { 5: "5m", 30: "30m", 60: "1h", 240: "4h", 480: "8h" };
+    const intervalMap: Record<number, string> = {
+      5: "5m",
+      30: "30m",
+      60: "1h",
+      240: "4h",
+      480: "8h",
+    };
     const interval = intervalMap[intervalMin] ?? "4h";
     const out: KlinePoint[] = [];
     let startTime = range.since.getTime();
     const end = range.until.getTime();
 
     while (startTime < end) {
-      const url = new URL("https://fapi.binance.com/fapi/v1/klines");
+      const url = new URL(`${API_ROOT}/fapi/v1/klines`);
       url.searchParams.set("symbol", nativeSymbol);
       url.searchParams.set("interval", interval);
       url.searchParams.set("startTime", String(startTime));

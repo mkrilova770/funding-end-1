@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -25,6 +26,11 @@ type BitgetHistoryRow = {
   fundingTime: string;
 };
 
+type BitgetContractRow = {
+  symbol: string;
+  fundInterval?: string;
+};
+
 function baseFromSymbol(symbol: string): string | null {
   if (!symbol.endsWith("USDT")) return null;
   const base = symbol.slice(0, -4);
@@ -35,14 +41,35 @@ export const bitgetAdapter: ExchangeFundingAdapter = {
   slug: "bitget" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
-    const url =
+    const tickersUrl =
       "https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES";
-    const res = await fetchWithRetry(
-      () => fetchJson<BitgetResp<BitgetTicker[]>>(url),
-      { retries: 2, baseDelayMs: 400 },
-    );
+    const contractsUrl =
+      "https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES";
+    const [res, contractsRes] = await Promise.all([
+      fetchWithRetry(() => fetchJson<BitgetResp<BitgetTicker[]>>(tickersUrl), {
+        retries: 2,
+        baseDelayMs: 400,
+      }),
+      fetchWithRetry(
+        () => fetchJson<BitgetResp<BitgetContractRow[]>>(contractsUrl),
+        { retries: 2, baseDelayMs: 400 },
+      ).catch(() => null),
+    ]);
     if (res.code !== "00000") {
       throw new Error(`Bitget tickers: ${res.msg}`);
+    }
+
+    const fundHoursBySymbol = new Map<string, number>();
+    if (
+      contractsRes &&
+      contractsRes.code === "00000" &&
+      Array.isArray(contractsRes.data)
+    ) {
+      for (const c of contractsRes.data) {
+        const n = Number(c.fundInterval);
+        const std = normalizeStandardFundingIntervalHours(n);
+        if (std !== null) fundHoursBySymbol.set(c.symbol, std);
+      }
     }
 
     const markets: NormalizedMarket[] = [];
@@ -66,6 +93,7 @@ export const bitgetAdapter: ExchangeFundingAdapter = {
         markPrice: row.markPrice,
         bestBid: row.bidPr,
         bestAsk: row.askPr,
+        fundingIntervalHours: fundHoursBySymbol.get(row.symbol) ?? null,
       });
     }
 

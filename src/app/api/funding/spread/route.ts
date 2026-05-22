@@ -3,6 +3,8 @@ import { ALL_EXCHANGE_SLUGS, EXCHANGE_ADAPTERS } from "@/lib/exchanges";
 import type { ExchangeAdapterSlug, KlinePoint } from "@/lib/exchanges/types";
 import {
   getCachedBidAsk,
+  getCachedLatestFundingRate,
+  getCachedMarkPrice,
   getCachedNativeSymbol,
   getLiveFundingTableNow,
 } from "@/lib/services/funding-table-live";
@@ -63,20 +65,28 @@ async function getKlinesCached(
   return points;
 }
 
-function findCloseB(
-  mapB: Map<number, number>,
-  timeA: number,
+function normalizeKlineTimeMs(t: number): number {
+  // Some exchanges may return seconds, others milliseconds.
+  return t < 1_000_000_000_000 ? t * 1000 : t;
+}
+
+function buildCloseByBucket(
+  points: KlinePoint[],
   intervalMs: number,
-): number | undefined {
-  let cb = mapB.get(timeA);
-  if (cb !== undefined) return cb;
-  const rounded = Math.round(timeA / intervalMs) * intervalMs;
-  cb = mapB.get(rounded);
-  if (cb !== undefined) return cb;
-  for (const [t, c] of mapB) {
-    if (Math.abs(t - timeA) < intervalMs * 0.6) return c;
+  nowMs: number,
+): Map<number, { time: number; close: number }> {
+  const out = new Map<number, { time: number; close: number }>();
+  for (const p of points) {
+    const t = normalizeKlineTimeMs(p.time);
+    const close = Number(p.close);
+    if (!Number.isFinite(t) || !Number.isFinite(close) || close <= 0) continue;
+    // Ignore not-yet-closed candle to keep "close" consistent with exchanges.
+    if (t + intervalMs > nowMs) continue;
+    const bucket = Math.floor(t / intervalMs) * intervalMs;
+    const prev = out.get(bucket);
+    if (!prev || t > prev.time) out.set(bucket, { time: t, close });
   }
-  return undefined;
+  return out;
 }
 
 export async function GET(req: Request) {
@@ -108,6 +118,9 @@ export async function GET(req: Request) {
     sortDir: "asc",
   });
 
+  const fundingRateA = getCachedLatestFundingRate(exchangeA, baseRaw);
+  const fundingRateB = getCachedLatestFundingRate(exchangeB, baseRaw);
+
   const nsA = getCachedNativeSymbol(exchangeA, baseRaw);
   const nsB = getCachedNativeSymbol(exchangeB, baseRaw);
   if (!nsA || !nsB) {
@@ -119,6 +132,8 @@ export async function GET(req: Request) {
 
   const baA = getCachedBidAsk(exchangeA, baseRaw);
   const baB = getCachedBidAsk(exchangeB, baseRaw);
+  const markA = getCachedMarkPrice(exchangeA, baseRaw);
+  const markB = getCachedMarkPrice(exchangeB, baseRaw);
 
   let currentSpread: {
     askA: number | null;
@@ -137,26 +152,35 @@ export async function GET(req: Request) {
     };
   } | null = null;
 
-  if (baA && baB) {
-    const entryAtoB = baA.ask > 0 ? ((baB.bid - baA.ask) / baA.ask) * 100 : null;
-    const exitAtoB = baA.bid > 0 ? ((baB.ask - baA.bid) / baA.bid) * 100 : null;
+  const pxA = {
+    bid: baA?.bid ?? markA ?? null,
+    ask: baA?.ask ?? markA ?? null,
+  };
+  const pxB = {
+    bid: baB?.bid ?? markB ?? null,
+    ask: baB?.ask ?? markB ?? null,
+  };
+
+  if (pxA.bid && pxA.ask && pxB.bid && pxB.ask) {
+    const entryAtoB = pxA.ask > 0 ? ((pxB.bid - pxA.ask) / pxA.ask) * 100 : null;
+    const exitAtoB = pxA.bid > 0 ? ((pxB.ask - pxA.bid) / pxA.bid) * 100 : null;
     const netAtoB =
       entryAtoB !== null && exitAtoB !== null
         ? entryAtoB - exitAtoB
         : null;
 
-    const entryBtoA = baB.ask > 0 ? ((baA.bid - baB.ask) / baB.ask) * 100 : null;
-    const exitBtoA = baB.bid > 0 ? ((baA.ask - baB.bid) / baB.bid) * 100 : null;
+    const entryBtoA = pxB.ask > 0 ? ((pxA.bid - pxB.ask) / pxB.ask) * 100 : null;
+    const exitBtoA = pxB.bid > 0 ? ((pxA.ask - pxB.bid) / pxB.bid) * 100 : null;
     const netBtoA =
       entryBtoA !== null && exitBtoA !== null
         ? entryBtoA - exitBtoA
         : null;
 
     currentSpread = {
-      askA: baA.ask,
-      bidA: baA.bid,
-      askB: baB.ask,
-      bidB: baB.bid,
+      askA: pxA.ask,
+      bidA: pxA.bid,
+      askB: pxB.ask,
+      bidB: pxB.bid,
       aToB: {
         entrySpread: entryAtoB,
         exitSpread: exitAtoB,
@@ -174,6 +198,8 @@ export async function GET(req: Request) {
   const adapterB = EXCHANGE_ADAPTERS[exchangeB];
   const supportsA = Boolean(adapterA.fetchKlines);
   const supportsB = Boolean(adapterB.fetchKlines);
+  let klineCountA = 0;
+  let klineCountB = 0;
 
   let history: {
     time: number;
@@ -188,22 +214,30 @@ export async function GET(req: Request) {
         getKlinesCached(exchangeA, nsA, days, intervalMin),
         getKlinesCached(exchangeB, nsB, days, intervalMin),
       ]);
+      klineCountA = klinesA.length;
+      klineCountB = klinesB.length;
 
       if (klinesA.length && klinesB.length) {
-        const mapB = new Map<number, number>();
-        for (const k of klinesB) mapB.set(k.time, k.close);
-
         const intervalMs = intervalMin * 60 * 1000;
-        for (const ka of klinesA) {
-          const cb = findCloseB(mapB, ka.time, intervalMs);
-          if (cb === undefined || cb === 0 || ka.close === 0) continue;
+        const nowMs = Date.now();
+        const aByBucket = buildCloseByBucket(klinesA, intervalMs, nowMs);
+        const bByBucket = buildCloseByBucket(klinesB, intervalMs, nowMs);
+        const commonBuckets = [...aByBucket.keys()]
+          .filter((b) => bByBucket.has(b))
+          .sort((x, y) => x - y);
+
+        for (const bucket of commonBuckets) {
+          const a = aByBucket.get(bucket);
+          const b = bByBucket.get(bucket);
+          if (!a || !b) continue;
+          if (a.close === 0 || b.close === 0) continue;
           // Directional entry-like spread for selected side A -> B (long A, short B):
           // negative => worse entry for this direction, positive => better entry.
           history.push({
-            time: ka.time,
-            spreadPct: ka.close > 0 ? ((cb - ka.close) / ka.close) * 100 : 0,
-            closeA: ka.close,
-            closeB: cb,
+            time: Math.max(a.time, b.time),
+            spreadPct: a.close > 0 ? ((b.close - a.close) / a.close) * 100 : 0,
+            closeA: a.close,
+            closeB: b.close,
           });
         }
         history.sort((a, b) => a.time - b.time);
@@ -220,9 +254,15 @@ export async function GET(req: Request) {
       exchangeB,
       days,
       intervalMin,
+      currentFundingRates: {
+        rateA: fundingRateA,
+        rateB: fundingRateB,
+      },
       currentSpread,
       supportsKlinesA: supportsA,
       supportsKlinesB: supportsB,
+      klineCountA,
+      klineCountB,
       history,
     },
     { headers: { "Cache-Control": "private, max-age=60, s-maxage=120" } },

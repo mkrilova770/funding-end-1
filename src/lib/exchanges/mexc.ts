@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -14,6 +15,8 @@ type MexcFundingRow = {
   nextSettleTime?: number;
   timestamp?: number;
   markPrice?: number;
+  /** Период начисления в часах (MEXC: collectCycle). */
+  collectCycle?: number;
 };
 
 type MexcFundingResp = {
@@ -76,6 +79,9 @@ export const mexcAdapter: ExchangeFundingAdapter = {
           ? new Date(row.nextSettleTime)
           : null,
         markPrice: row.markPrice != null ? String(row.markPrice) : undefined,
+        fundingIntervalHours: normalizeStandardFundingIntervalHours(
+          row.collectCycle,
+        ),
       });
     }
 

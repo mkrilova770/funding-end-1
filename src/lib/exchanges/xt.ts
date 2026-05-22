@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -19,6 +20,8 @@ type XtContract = {
   mark_price?: string;
   bid?: string;
   ask?: string;
+  /** Период начисления в часах (1 / 2 / 4 / 8). */
+  collection_internal?: number | string;
 };
 
 type XtContractsResp = XtContract[];
@@ -63,6 +66,15 @@ export const xtAdapter: ExchangeFundingAdapter = {
         baseAsset: base,
         quoteAsset: "USDT",
       });
+      const coll = row.collection_internal;
+      const collNum =
+        coll === "" || coll === undefined || coll === null
+          ? NaN
+          : Number(coll);
+      const fundingIntervalHours = Number.isFinite(collNum)
+        ? normalizeStandardFundingIntervalHours(collNum)
+        : null;
+
       latest.push({
         nativeSymbol: row.symbol,
         rate: String(row.funding_rate),
@@ -72,6 +84,7 @@ export const xtAdapter: ExchangeFundingAdapter = {
         markPrice: row.mark_price,
         bestBid: row.bid,
         bestAsk: row.ask,
+        fundingIntervalHours,
       });
     }
 

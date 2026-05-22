@@ -16,6 +16,8 @@ export type LatestFunding = {
   bestBid?: string;
   /** Лучшая цена продажи (ask) */
   bestAsk?: string;
+  /** Период начисления в часах (обычно 1 / 2 / 4 / 8), если API его отдаёт. */
+  fundingIntervalHours?: number | null;
 };
 
 export type KlinePoint = {
@@ -43,7 +45,25 @@ export type ExchangeAdapterSlug =
   | "mexc"
   | "bingx"
   | "lbank"
-  | "xt";
+  | "xt"
+  | "htx"
+  | "kraken"
+  | "bitmart"
+  | "toobit"
+  | "coinw"
+  | "ourbit"
+  | "zoomex"
+  | "coinex"
+  | "phemex"
+  | "bitunix"
+  | "whitebit"
+  | "tapbit"
+  | "ascendex"
+  | "bitrue"
+  | "blofin"
+  | "woox"
+  | "asterdex"
+  | "hyperliquid";
 
 export interface ExchangeFundingAdapter {
   readonly slug: ExchangeAdapterSlug;

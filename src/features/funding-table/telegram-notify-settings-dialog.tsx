@@ -14,15 +14,21 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
+import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
+import { EXCHANGE_LABELS } from "@/lib/exchanges/labels";
 import {
   normalizeMskSlot,
   PRESET_MSK_SLOTS,
+  type TelegramDigestMetric,
 } from "@/lib/services/telegram-digest-config";
 import { cn } from "@/lib/utils";
 
 type SettingsResponse = {
   maxSpreadThresholdPct: number;
   mskSlots: string[];
+  exchanges: ExchangeAdapterSlug[];
+  metric: TelegramDigestMetric;
   enabled: boolean;
   updatedAt: string | null;
   requiresSecret: boolean;
@@ -36,6 +42,10 @@ export function TelegramNotifySettingsDialog() {
   const [slots, setSlots] = useState<Set<string>>(
     () => new Set(PRESET_MSK_SLOTS),
   );
+  const [exchanges, setExchanges] = useState<Set<ExchangeAdapterSlug>>(
+    () => new Set(ALL_EXCHANGE_SLUGS),
+  );
+  const [metric, setMetric] = useState<TelegramDigestMetric>("maxSpread");
   const [secret, setSecret] = useState("");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [customTime, setCustomTime] = useState("");
@@ -77,6 +87,8 @@ export function TelegramNotifySettingsDialog() {
     setEnabled(q.data.enabled);
     setThresholdPct(String(q.data.maxSpreadThresholdPct));
     setSlots(new Set(q.data.mskSlots));
+    setExchanges(new Set(q.data.exchanges));
+    setMetric(q.data.metric ?? "maxSpread");
   }, [q.data]);
 
   const save = useMutation({
@@ -97,6 +109,8 @@ export function TelegramNotifySettingsDialog() {
         body: JSON.stringify({
           maxSpreadThresholdPct: pct,
           mskSlots: [...slots],
+          exchanges: [...exchanges],
+          metric,
           enabled,
         }),
       });
@@ -141,6 +155,15 @@ export function TelegramNotifySettingsDialog() {
     setSlots((prev) => {
       const next = new Set(prev);
       next.delete(s);
+      return next;
+    });
+  }, []);
+
+  const toggleExchange = useCallback((slug: ExchangeAdapterSlug) => {
+    setExchanges((prev) => {
+      const next = new Set(prev);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
       return next;
     });
   }, []);
@@ -192,7 +215,7 @@ export function TelegramNotifySettingsDialog() {
         <DialogHeader>
           <DialogTitle>Уведомления в Telegram</DialogTitle>
           <DialogDescription>
-            Порог по столбцу «Max спред» (разница ставок фандинга между биржами). Время —
+            Режим уведомлений: max спред или max фандинг. Время —
             Europe/Moscow: пресеты и своё в формате ЧЧ:ММ. Токен бота и chat id — в переменных
             окружения на сервере (воркер). «Отправить тест сейчас» — проверка без ожидания
             расписания.
@@ -229,7 +252,31 @@ export function TelegramNotifySettingsDialog() {
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="tg-threshold">Мин. max спред для списка (%)</Label>
+                <span className="text-sm font-medium">Режим дайджеста</span>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={metric === "maxSpread" ? "default" : "outline"}
+                    onClick={() => setMetric("maxSpread")}
+                  >
+                    Макс. спред
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant={metric === "maxFunding" ? "default" : "outline"}
+                    onClick={() => setMetric("maxFunding")}
+                  >
+                    Макс. фандинг
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="tg-threshold">
+                  Мин. {metric === "maxFunding" ? "max фандинг" : "max спред"} для списка (%)
+                </Label>
                 <Input
                   id="tg-threshold"
                   type="text"
@@ -240,8 +287,9 @@ export function TelegramNotifySettingsDialog() {
                   className="max-w-[140px]"
                 />
                 <p className="text-xs text-muted-foreground">
-                  В уведомление попадут токены, у которых max спред <strong>строго больше</strong>{" "}
-                  этого значения (как на сайте: доля × 100 = %).
+                  В уведомление попадут токены, у которых{" "}
+                  {metric === "maxFunding" ? "max фандинг" : "max спред"}{" "}
+                  <strong>строго больше</strong> этого значения (как на сайте: доля × 100 = %).
                 </p>
               </div>
 
@@ -362,6 +410,43 @@ export function TelegramNotifySettingsDialog() {
                 ) : null}
               </div>
 
+              <div className="grid gap-2">
+                <span className="text-sm font-medium">Биржи для уведомлений</span>
+                <div className="flex max-h-44 flex-wrap gap-2 overflow-auto rounded-md border p-2">
+                  {ALL_EXCHANGE_SLUGS.map((slug) => {
+                    const id = `tg-ex-${slug}`;
+                    const on = exchanges.has(slug);
+                    return (
+                      <div
+                        key={slug}
+                        className={cn(
+                          "flex items-center gap-1.5 rounded-md border px-2 py-1.5 text-sm transition-colors",
+                          on
+                            ? "border-foreground/30 bg-muted/50"
+                            : "border-border/80 opacity-80",
+                        )}
+                      >
+                        <input
+                          id={id}
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggleExchange(slug)}
+                          className="size-4 shrink-0 rounded border-input"
+                        />
+                        <Label htmlFor={id} className="cursor-pointer">
+                          {EXCHANGE_LABELS[slug] ?? slug}
+                        </Label>
+                      </div>
+                    );
+                  })}
+                </div>
+                {exchanges.size === 0 ? (
+                  <p className="text-xs text-amber-800 dark:text-amber-200/90">
+                    Выберите хотя бы одну биржу.
+                  </p>
+                ) : null}
+              </div>
+
               <div className="flex flex-wrap items-center gap-2 border-t border-border/60 pt-3">
                 <Button
                   type="button"
@@ -427,7 +512,7 @@ export function TelegramNotifySettingsDialog() {
           </Button>
           <Button
             type="button"
-            disabled={save.isPending || q.isLoading || !q.isSuccess}
+            disabled={save.isPending || q.isLoading || !q.isSuccess || exchanges.size === 0}
             onClick={() => save.mutate()}
           >
             {save.isPending ? "Сохранение…" : "Сохранить"}

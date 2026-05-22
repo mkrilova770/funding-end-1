@@ -1,4 +1,6 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { mapLimit } from "@/lib/exchanges/parallel-limited";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -28,6 +30,8 @@ type BybitInstrumentRow = {
   contractType: string;
   status: string;
   quoteCoin: string;
+  /** Минуты между начислениями (напр. 480 = 8 ч). */
+  fundingInterval?: number;
 };
 
 type BybitInstrumentsResp = {
@@ -89,9 +93,16 @@ async function fetchAllLinearUsdtTickers(): Promise<BybitTicker[]> {
   return all;
 }
 
-/** USDT linear perpetuals that are open for trading (excludes settled / pre-launch noise in tickers). */
-async function fetchTradableLinearUsdtSymbols(): Promise<Set<string>> {
-  const out = new Set<string>();
+/**
+ * USDT linear perpetuals eligible for the table.
+ * Bybit marks some actively quoted contracts (e.g. pre-list perps like BPUSDT) as `PreLaunch`, not `Trading`.
+ */
+async function fetchTradableLinearUsdtMeta(): Promise<{
+  tradable: Set<string>;
+  fundingIntervalMinBySymbol: Map<string, number>;
+}> {
+  const tradable = new Set<string>();
+  const fundingIntervalMinBySymbol = new Map<string, number>();
   let cursor: string | undefined = undefined;
 
   for (let page = 0; page < 50; page++) {
@@ -109,39 +120,111 @@ async function fetchTradableLinearUsdtSymbols(): Promise<Set<string>> {
     }
     const list = data.result.list ?? [];
     for (const row of list) {
+      const statusOk =
+        row.status === "Trading" || row.status === "PreLaunch";
       if (
-        row.status === "Trading" &&
+        statusOk &&
         row.contractType === "LinearPerpetual" &&
         row.quoteCoin === "USDT" &&
         row.symbol.endsWith("USDT") &&
         !row.symbol.includes("-")
       ) {
-        out.add(row.symbol);
+        tradable.add(row.symbol);
+        if (
+          typeof row.fundingInterval === "number" &&
+          row.fundingInterval > 0
+        ) {
+          fundingIntervalMinBySymbol.set(row.symbol, row.fundingInterval);
+        }
       }
     }
     cursor = data.result.nextPageCursor;
     if (!cursor || list.length === 0) break;
   }
 
-  return out;
+  return { tradable, fundingIntervalMinBySymbol };
+}
+
+/**
+ * Иногда контракт есть в tickers, но не попадает в страницу `instruments-info` без `symbol=`
+ * (пример: BPUSDT в PreLaunch). Дополняем whitelist точечным запросом по символу.
+ */
+async function augmentTradableFromOrphanTickers(
+  tickers: BybitTicker[],
+  tradable: Set<string>,
+  fundingIntervalMinBySymbol: Map<string, number>,
+): Promise<void> {
+  const seenOrphan = new Set<string>();
+  const orphans: BybitTicker[] = [];
+  for (const t of tickers) {
+    if (!t.symbol.endsWith("USDT") || t.symbol.includes("-")) continue;
+    if (tradable.has(t.symbol)) continue;
+    if (seenOrphan.has(t.symbol)) continue;
+    seenOrphan.add(t.symbol);
+    orphans.push(t);
+  }
+  if (orphans.length === 0) return;
+
+  await mapLimit(orphans, 8, async (t) => {
+    const url = new URL("https://api.bybit.com/v5/market/instruments-info");
+    url.searchParams.set("category", "linear");
+    url.searchParams.set("symbol", t.symbol);
+
+    const data = await fetchWithRetry(
+      () => fetchJson<BybitInstrumentsResp>(url.toString()),
+      { retries: 2, baseDelayMs: 400 },
+    );
+    if (data.retCode !== 0) return;
+
+    const row = data.result.list?.[0] as BybitInstrumentRow | undefined;
+    if (!row) return;
+
+    const statusOk = row.status === "Trading" || row.status === "PreLaunch";
+    if (
+      statusOk &&
+      row.contractType === "LinearPerpetual" &&
+      row.quoteCoin === "USDT" &&
+      row.symbol.endsWith("USDT") &&
+      !row.symbol.includes("-")
+    ) {
+      tradable.add(row.symbol);
+      if (
+        typeof row.fundingInterval === "number" &&
+        row.fundingInterval > 0
+      ) {
+        fundingIntervalMinBySymbol.set(row.symbol, row.fundingInterval);
+      }
+    }
+  });
 }
 
 export const bybitAdapter: ExchangeFundingAdapter = {
   slug: "bybit" as ExchangeAdapterSlug,
 
   async fetchMarketsWithLatest() {
-    const [tickers, tradable] = await Promise.all([
+    const [tickers, meta] = await Promise.all([
       fetchAllLinearUsdtTickers(),
-      fetchTradableLinearUsdtSymbols(),
+      fetchTradableLinearUsdtMeta(),
     ]);
+    await augmentTradableFromOrphanTickers(
+      tickers,
+      meta.tradable,
+      meta.fundingIntervalMinBySymbol,
+    );
+
     const markets: NormalizedMarket[] = [];
     const latest: LatestFunding[] = [];
 
     for (const t of tickers) {
-      if (!tradable.has(t.symbol)) continue;
+      if (!meta.tradable.has(t.symbol)) continue;
       const base = baseFromLinearUsdt(t.symbol);
       if (!base) continue;
       if (t.fundingRate === undefined) continue;
+      const minIv = meta.fundingIntervalMinBySymbol.get(t.symbol);
+      const intervalH =
+        minIv !== undefined
+          ? normalizeStandardFundingIntervalHours(minIv / 60)
+          : null;
       markets.push({
         nativeSymbol: t.symbol,
         baseAsset: base,
@@ -156,6 +239,7 @@ export const bybitAdapter: ExchangeFundingAdapter = {
         markPrice: t.markPrice,
         bestBid: t.bid1Price,
         bestAsk: t.ask1Price,
+        fundingIntervalHours: intervalH,
       });
     }
 

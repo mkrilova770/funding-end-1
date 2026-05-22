@@ -60,6 +60,55 @@ export function buildSpreadDigestMessage(opts: {
   return lines.join("\n");
 }
 
+export function buildMaxFundingDigestMessage(opts: {
+  rows: {
+    baseAsset: string;
+    ratesByExchange: Partial<Record<ExchangeAdapterSlug, number | null>>;
+  }[];
+  updatedAtIso: string;
+  titleSuffix: string;
+  /** Порог в долях; строго выше порога. */
+  thresholdFraction: number;
+}): string {
+  const thr = opts.thresholdFraction;
+  const picked = opts.rows
+    .map((r) => {
+      let maxVal: number | null = null;
+      let maxSlug: ExchangeAdapterSlug | null = null;
+      for (const [slugRaw, v] of Object.entries(r.ratesByExchange)) {
+        const slug = slugRaw as ExchangeAdapterSlug;
+        if (v === null || v === undefined || !Number.isFinite(v) || v <= 0) continue;
+        if (maxVal === null || v > maxVal) {
+          maxVal = v;
+          maxSlug = slug;
+        }
+      }
+      return { baseAsset: r.baseAsset, v: maxVal, slug: maxSlug };
+    })
+    .filter((x) => x.v !== null && (x.v as number) > thr)
+    .sort((a, b) => (b.v as number) - (a.v as number));
+
+  const pctLabel = (thr * 100).toFixed(2).replace(".", ",");
+  const lines: string[] = [
+    `<b>Фандинг: max фандинг &gt; ${escapeHtml(pctLabel)}%</b> (${escapeHtml(opts.titleSuffix)})`,
+    `<i>Обновлено: ${escapeHtml(opts.updatedAtIso)}</i>`,
+    "",
+  ];
+  if (picked.length === 0) {
+    lines.push("Нет токенов выше порога.");
+  } else {
+    lines.push(`Всего: <b>${picked.length}</b>`, "");
+    for (const r of picked) {
+      const pct = formatSpreadPct(r.v as number);
+      const lbl = r.slug ? EXCHANGE_LABELS[r.slug] ?? r.slug : "";
+      lines.push(
+        `• <b>${escapeHtml(r.baseAsset)}</b> — ${escapeHtml(pct)}${lbl ? ` (${escapeHtml(lbl)})` : ""}`,
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
 async function telegramSendMessage(text: string): Promise<void> {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
@@ -97,24 +146,33 @@ async function telegramSendMessage(text: string): Promise<void> {
  */
 export async function sendTelegramSpreadDigest(): Promise<void> {
   let thresholdFraction = SPREAD_DIGEST_THRESHOLD;
+  let digestExchanges: ExchangeAdapterSlug[] | undefined = undefined;
   try {
     const cfg = await getTelegramDigestConfig(prisma);
     thresholdFraction = cfg.maxSpreadThreshold;
+    digestExchanges = cfg.exchanges;
   } catch {
     /* БД не готова — дефолтный порог */
   }
-  const rows = await getLiveFundingTableAllRows();
+  const rows = await getLiveFundingTableAllRows(digestExchanges);
   const updatedAtIso = new Date().toISOString();
   const titleSuffix = new Intl.DateTimeFormat("ru-RU", {
     timeZone: "Europe/Moscow",
     dateStyle: "short",
     timeStyle: "short",
   }).format(new Date());
-  const msg = buildSpreadDigestMessage({
+  const spreadMsg = buildSpreadDigestMessage({
     rows,
     updatedAtIso,
     titleSuffix,
     thresholdFraction,
   });
-  await telegramSendMessage(msg);
+  const maxFundingMsg = buildMaxFundingDigestMessage({
+    rows,
+    updatedAtIso,
+    titleSuffix,
+    thresholdFraction,
+  });
+  await telegramSendMessage(spreadMsg);
+  await telegramSendMessage(maxFundingMsg);
 }

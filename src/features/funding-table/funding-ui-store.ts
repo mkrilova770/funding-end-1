@@ -8,7 +8,7 @@ import type {
 } from "@/lib/services/funding-table";
 import { arrayMove } from "@dnd-kit/sortable";
 
-export type FundingPeriodUi = "now" | "week" | "month";
+export type FundingPeriodUi = "now" | "day" | "threeDays" | "week" | "month";
 
 export type DashboardMainTab = "all" | "saved";
 
@@ -100,8 +100,54 @@ export function defaultColumnOrder(): ColumnId[] {
 
 function defaultColumnVisibility(): Record<ColumnId, boolean> {
   return Object.fromEntries(
-    defaultColumnOrder().map((id) => [id, true]),
+    defaultColumnOrder().map((id) => [id, id === "ourbit" ? false : true]),
   ) as Record<ColumnId, boolean>;
+}
+
+/** Удалённые колонки интервала фандинга — вычищаем из persist, если остались в localStorage. */
+const REMOVED_INTERVAL_COLUMN_IDS = new Set([
+  "funding1h",
+  "funding4h",
+  "funding8h",
+]);
+
+/**
+ * После добавления биржи в код старый localStorage не содержит её в `columnOrder`,
+ * и колонка не рисуется (таблица идёт только по сохранённому порядку). Вставляем
+ * отсутствующие id в ту же позицию, что в `defaultColumnOrder()`.
+ */
+function normalizeColumnOrderWithRegistry(raw: ColumnId[] | undefined): ColumnId[] {
+  const defaults = defaultColumnOrder();
+  const defaultIdx = new Map(defaults.map((id, i) => [id, i]));
+  const allowed = new Set(defaults);
+
+  let order = (raw ?? []).filter(
+    (id) =>
+      (id as string) !== "history" &&
+      !REMOVED_INTERVAL_COLUMN_IDS.has(id as string) &&
+      allowed.has(id),
+  ) as ColumnId[];
+  if (!order.length) return [...defaults];
+  if (order[0] !== "coins") {
+    order = ["coins", ...order.filter((id) => id !== "coins")];
+  }
+
+  const have = new Set(order);
+  for (const id of defaults) {
+    if (have.has(id)) continue;
+    const target = defaultIdx.get(id) ?? 0;
+    let insertAt = 0;
+    for (let i = order.length - 1; i >= 0; i--) {
+      const idx = defaultIdx.get(order[i]!) ?? 0;
+      if (idx < target) {
+        insertAt = i + 1;
+        break;
+      }
+    }
+    order.splice(insertAt, 0, id);
+    have.add(id);
+  }
+  return order;
 }
 
 type State = {
@@ -126,6 +172,7 @@ type State = {
   setPageSize: (v: number) => void;
   setSettingsOpen: (v: boolean) => void;
   setSortColumn: (col: FundingTableSortKey) => void;
+  setSort: (col: FundingTableSortKey, dir: FundingTableSortDir) => void;
   hideToken: (base: string) => void;
   restoreToken: (base: string) => void;
   restoreAllTokens: () => void;
@@ -147,6 +194,10 @@ type State = {
 
   toggleColumnVisibility: (id: ColumnId) => void;
   reorderColumns: (activeId: ColumnId, overId: ColumnId) => void;
+  /** Все колонки бирж visible=true (coins / maxSpread не трогаем). */
+  showAllExchangeColumns: () => void;
+  /** Все колонки бирж visible=false. */
+  hideAllExchangeColumns: () => void;
 };
 
 export const useFundingUiStore = create<State>()(
@@ -185,6 +236,7 @@ export const useFundingUiStore = create<State>()(
             col === "coins" ? "asc" : "desc";
           return { sortColumn: col, sortDirection, page: 1 };
         }),
+      setSort: (col, dir) => set({ sortColumn: col, sortDirection: dir, page: 1 }),
 
       hideToken: (base) =>
         set((s) =>
@@ -319,6 +371,24 @@ export const useFundingUiStore = create<State>()(
         }));
       },
 
+      showAllExchangeColumns: () =>
+        set((s) => {
+          const columnVisibility = { ...s.columnVisibility };
+          for (const id of ALL_EXCHANGE_SLUGS) {
+            columnVisibility[id] = true;
+          }
+          return { columnVisibility };
+        }),
+
+      hideAllExchangeColumns: () =>
+        set((s) => {
+          const columnVisibility = { ...s.columnVisibility };
+          for (const id of ALL_EXCHANGE_SLUGS) {
+            columnVisibility[id] = false;
+          }
+          return { columnVisibility };
+        }),
+
       reorderColumns: (activeId, overId) => {
         if (activeId === "coins" || overId === "coins") return;
         set((s) => {
@@ -352,16 +422,13 @@ export const useFundingUiStore = create<State>()(
       }),
       merge: (persisted, current) => {
         const p = persisted as Partial<State>;
-        let columnOrder = (p.columnOrder ?? current.columnOrder).filter(
-          (id) => (id as string) !== "history",
-        ) as ColumnId[];
-        if (!columnOrder.length) columnOrder = defaultColumnOrder();
-        if (columnOrder[0] !== "coins") {
-          columnOrder = [
-            "coins",
-            ...columnOrder.filter((id) => id !== "coins"),
-          ];
-        }
+        const columnOrder = normalizeColumnOrderWithRegistry(
+          p.columnOrder ?? current.columnOrder,
+        );
+        const rawSort = (p.sortColumn ?? current.sortColumn) as FundingTableSortKey;
+        const sortColumn = REMOVED_INTERVAL_COLUMN_IDS.has(rawSort as string)
+          ? ("maxSpread" as const)
+          : rawSort;
         const vis: Record<ColumnId, boolean> = { ...defaultColumnVisibility() };
         if (p.columnVisibility) {
           const allowed = new Set<ColumnId>(defaultColumnOrder());
@@ -405,6 +472,7 @@ export const useFundingUiStore = create<State>()(
           ...p,
           columnOrder,
           columnVisibility: vis,
+          sortColumn,
           hiddenTokens: Array.isArray(p.hiddenTokens) ? p.hiddenTokens : [],
           dashboardMainTab: tab,
           savedFolders,

@@ -691,6 +691,11 @@ type SpreadPayload = {
   exchangeA: string;
   exchangeB: string;
   days: number;
+  /** Текущие ставки из live-снимка (та же логика, что таблица «Сейчас»). */
+  currentFundingRates?: {
+    rateA: number | null;
+    rateB: number | null;
+  };
   currentSpread: {
     askA: number | null;
     bidA: number | null;
@@ -710,8 +715,108 @@ type SpreadPayload = {
   intervalMin: number;
   supportsKlinesA: boolean;
   supportsKlinesB: boolean;
+  klineCountA?: number;
+  klineCountB?: number;
   history: { time: number; spreadPct: number; closeA: number; closeB: number }[];
 };
+
+function LiveFundingCompareSection({
+  labelA,
+  labelB,
+  spreadLoading,
+  spreadFetching,
+  spreadError,
+  rates,
+}: {
+  labelA: string;
+  labelB: string;
+  spreadLoading: boolean;
+  spreadFetching: boolean;
+  spreadError: boolean;
+  rates: { rateA: number | null; rateB: number | null } | undefined;
+}) {
+  if (spreadError) return null;
+
+  const diff =
+    rates &&
+    rates.rateA !== null &&
+    rates.rateB !== null &&
+    Number.isFinite(rates.rateA) &&
+    Number.isFinite(rates.rateB)
+      ? rates.rateB - rates.rateA
+      : null;
+
+  return (
+    <div className="rounded-xl border border-sky-500/30 bg-sky-500/[0.08] px-4 py-3 shadow-sm dark:bg-sky-950/30">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-foreground">
+          Текущий фандинг (сейчас)
+        </h3>
+        {spreadFetching && !spreadLoading ? (
+          <span className="text-[10px] text-muted-foreground">обновление…</span>
+        ) : null}
+      </div>
+      {spreadLoading && !rates ? (
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span className="size-3 animate-pulse rounded-full bg-sky-500/50" />
+          Загрузка текущих ставок…
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 sm:items-end">
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {labelA}
+            </div>
+            <div
+              className={cn(
+                "text-lg font-bold tabular-nums sm:text-xl",
+                rates?.rateA != null && Number.isFinite(rates.rateA)
+                  ? fundingCellClass(rates.rateA)
+                  : "text-muted-foreground",
+              )}
+            >
+              {rates?.rateA != null && Number.isFinite(rates.rateA)
+                ? formatFundingPercentSigned(rates.rateA, 5)
+                : "—"}
+            </div>
+          </div>
+          <div>
+            <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {labelB}
+            </div>
+            <div
+              className={cn(
+                "text-lg font-bold tabular-nums sm:text-xl",
+                rates?.rateB != null && Number.isFinite(rates.rateB)
+                  ? fundingCellClass(rates.rateB)
+                  : "text-muted-foreground",
+              )}
+            >
+              {rates?.rateB != null && Number.isFinite(rates.rateB)
+                ? formatFundingPercentSigned(rates.rateB, 5)
+                : "—"}
+            </div>
+          </div>
+          {diff !== null ? (
+            <div>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                Разница (B − A)
+              </div>
+              <div
+                className={cn(
+                  "text-lg font-bold tabular-nums sm:text-xl",
+                  fundingCellClass(diff),
+                )}
+              >
+                {formatFundingPercentSigned(diff, 5)}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function useSpreadData(
   exchangeA: ExchangeAdapterSlug | null,
@@ -1140,9 +1245,14 @@ function SpreadChart({ data, labelA, labelB, interval, onIntervalChange, showRev
   }
 
   if (!model || rows.length < 2) {
+    const aCount = data.klineCountA ?? 0;
+    const bCount = data.klineCountB ?? 0;
     return (
-      <div className="flex h-32 items-center justify-center rounded-lg border border-border/60 bg-card text-sm text-muted-foreground">
-        Недостаточно данных для графика спреда
+      <div className="flex h-32 flex-col items-center justify-center gap-1 rounded-lg border border-border/60 bg-card px-3 text-center text-sm text-muted-foreground">
+        <span>Недостаточно данных для графика спреда</span>
+        <span className="text-xs">
+          Свечи: {labelA} — {aCount}, {labelB} — {bCount}
+        </span>
       </div>
     );
   }
@@ -1661,7 +1771,17 @@ export function FundingCompareDialog({
             <div className="flex flex-col items-center justify-center gap-3 py-24 text-muted-foreground">
               <span className="text-sm">Выберите обе биржи для сравнения</span>
             </div>
-          ) : isLoading ? (
+          ) : (
+            <>
+              <LiveFundingCompareSection
+                labelA={labelA}
+                labelB={labelB}
+                spreadLoading={spreadQuery.isLoading}
+                spreadFetching={spreadQuery.isFetching}
+                spreadError={spreadQuery.isError}
+                rates={spreadQuery.data?.currentFundingRates}
+              />
+              {isLoading ? (
             <div className="flex flex-col items-center justify-center gap-3 py-24 text-muted-foreground">
               <div className="size-10 animate-pulse rounded-full bg-muted" />
               <span className="text-sm">Загрузка истории…</span>
@@ -1759,6 +1879,8 @@ export function FundingCompareDialog({
                   <EventsColumn slug={exchangeB} points={queryB.data.points} color={CHART_LINE_B} />
                 )}
               </div>
+            </>
+          )}
             </>
           )}
         </div>

@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -14,6 +15,8 @@ type BingxPremiumRow = {
   lastFundingRate?: string;
   nextFundingTime?: number;
   markPrice?: string;
+  /** 1 / 4 / 8 и т.д. — из того же эндпойнта, что и ставка. */
+  fundingIntervalHours?: number;
 };
 
 type BingxContractRow = {
@@ -96,6 +99,9 @@ export const bingxAdapter: ExchangeFundingAdapter = {
             ? new Date(row.nextFundingTime)
             : null,
         markPrice: row.markPrice,
+        fundingIntervalHours: normalizeStandardFundingIntervalHours(
+          row.fundingIntervalHours,
+        ),
       });
     }
 

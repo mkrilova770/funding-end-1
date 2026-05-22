@@ -1,4 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
+import { ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
+import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
 
 /** Доступные слоты по МСК (выбор на сайте). */
 export const PRESET_MSK_SLOTS = [
@@ -13,10 +15,13 @@ export const PRESET_MSK_SLOTS = [
 export type PresetMskSlot = (typeof PRESET_MSK_SLOTS)[number];
 
 export const DEFAULT_MAX_SPREAD_THRESHOLD = 0.0025;
+export type TelegramDigestMetric = "maxSpread" | "maxFunding";
 
 export type TelegramDigestConfigDto = {
   maxSpreadThreshold: number;
   mskSlots: string[];
+  exchanges: ExchangeAdapterSlug[];
+  metric: TelegramDigestMetric;
   enabled: boolean;
   updatedAt: string | null;
 };
@@ -61,9 +66,36 @@ function parseSlotsJson(raw: string | null | undefined): string[] {
   }
 }
 
+function parseExchangesJson(
+  raw: string | null | undefined,
+): ExchangeAdapterSlug[] {
+  const allowed = new Set<string>(ALL_EXCHANGE_SLUGS);
+  if (!raw?.trim()) return [...ALL_EXCHANGE_SLUGS];
+  try {
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [...ALL_EXCHANGE_SLUGS];
+    const out: ExchangeAdapterSlug[] = [];
+    const seen = new Set<string>();
+    for (const x of arr) {
+      if (typeof x !== "string") continue;
+      const slug = x.trim() as ExchangeAdapterSlug;
+      if (!allowed.has(slug) || seen.has(slug)) continue;
+      seen.add(slug);
+      out.push(slug);
+    }
+    return out.length > 0 ? out : [...ALL_EXCHANGE_SLUGS];
+  } catch {
+    return [...ALL_EXCHANGE_SLUGS];
+  }
+}
+
 function normalizeThreshold(fraction: number): number {
   if (!Number.isFinite(fraction) || fraction <= 0) return DEFAULT_MAX_SPREAD_THRESHOLD;
   return Math.min(0.2, Math.max(0.00005, fraction));
+}
+
+function normalizeMetric(raw: unknown): TelegramDigestMetric {
+  return raw === "maxFunding" ? "maxFunding" : "maxSpread";
 }
 
 export async function getTelegramDigestConfig(
@@ -86,6 +118,8 @@ export async function getTelegramDigestConfig(
   return {
     maxSpreadThreshold: row.maxSpreadThreshold,
     mskSlots: parseSlotsJson(row.mskSlotsJson),
+    exchanges: parseExchangesJson(row.exchangesJson),
+    metric: normalizeMetric((row as { metric?: unknown }).metric),
     enabled: row.enabled,
     updatedAt: row.updatedAt.toISOString(),
   };
@@ -94,6 +128,8 @@ export async function getTelegramDigestConfig(
 export type TelegramDigestConfigUpdate = {
   maxSpreadThreshold: number;
   mskSlots: string[];
+  exchanges: ExchangeAdapterSlug[];
+  metric: TelegramDigestMetric;
   enabled: boolean;
 };
 
@@ -117,17 +153,33 @@ export async function upsertTelegramDigestConfig(
   }
   const sortedSlots = sortSlotsAsc(slots);
   const threshold = normalizeThreshold(patch.maxSpreadThreshold);
+  const allowed = new Set<string>(ALL_EXCHANGE_SLUGS);
+  const exchangeSeen = new Set<string>();
+  const exchanges: ExchangeAdapterSlug[] = [];
+  for (const raw of patch.exchanges) {
+    const slug = String(raw).trim() as ExchangeAdapterSlug;
+    if (!allowed.has(slug) || exchangeSeen.has(slug)) continue;
+    exchangeSeen.add(slug);
+    exchanges.push(slug);
+  }
+  if (exchanges.length === 0) {
+    throw new Error("Выберите хотя бы одну биржу для уведомлений");
+  }
   await client.telegramDigestConfig.upsert({
     where: { id: 1 },
     create: {
       id: 1,
       maxSpreadThreshold: threshold,
       mskSlotsJson: JSON.stringify(sortedSlots),
+      exchangesJson: JSON.stringify(exchanges),
+      metric: normalizeMetric(patch.metric),
       enabled: Boolean(patch.enabled),
     },
     update: {
       maxSpreadThreshold: threshold,
       mskSlotsJson: JSON.stringify(sortedSlots),
+      exchangesJson: JSON.stringify(exchanges),
+      metric: normalizeMetric(patch.metric),
       enabled: Boolean(patch.enabled),
     },
   });

@@ -17,6 +17,7 @@ import { EXCHANGE_LABELS } from "@/lib/exchanges/labels";
 import {
   fundingCellClass,
   formatFundingPercent,
+  formatFundingIntervalShortLabel,
 } from "@/lib/formatters/funding";
 import type { FundingTableRow } from "@/lib/services/funding-table";
 import type { ColumnId } from "@/features/funding-table/funding-ui-store";
@@ -27,11 +28,13 @@ import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
 function ExchangeBadge({ slug }: { slug: ExchangeAdapterSlug }) {
   const label = EXCHANGE_LABELS[slug];
   return (
-    <div className="flex items-center gap-2">
-      <div className="grid size-6 shrink-0 place-items-center overflow-hidden rounded-md border bg-background">
-        <ExchangeIcon slug={slug} className="size-5" title={label} />
+    <div className="flex max-w-[7.5rem] items-center gap-1 sm:max-w-none sm:gap-1.5">
+      <div className="grid size-5 shrink-0 place-items-center overflow-hidden rounded border bg-background sm:size-6">
+        <ExchangeIcon slug={slug} className="size-4 sm:size-5" title={label} />
       </div>
-      <span className="text-xs font-medium">{label}</span>
+      <span className="truncate text-[10px] font-medium leading-tight sm:text-xs">
+        {label}
+      </span>
     </div>
   );
 }
@@ -99,10 +102,14 @@ function futuresLink(slug: ExchangeAdapterSlug, base: string): string | null {
   switch (slug) {
     case "binance":
       return `https://www.binance.com/en/futures/${b}USDT`;
+    case "asterdex":
+      return `https://www.asterdex.com/en/futures/v1/${b}USDT`;
     case "bybit":
       return `https://www.bybit.com/trade/usdt/${b}USDT`;
     case "okx":
       return `https://www.okx.com/trade-swap/${b.toLowerCase()}-usdt-swap`;
+    case "hyperliquid":
+      return `https://app.hyperliquid.xyz/trade/${encodeURIComponent(b)}`;
     case "gate":
       return `https://www.gate.io/futures_trade/USDT/${b}_USDT`;
     case "bitget":
@@ -112,11 +119,44 @@ function futuresLink(slug: ExchangeAdapterSlug, base: string): string | null {
     case "mexc":
       return `https://futures.mexc.com/exchange/${b}_USDT?type=linear_swap`;
     case "bingx":
-      return `https://bingx.com/en-us/futures/forward/${b}USDT`;
+      /** USDⓢ-M perpetual (не linear forward). */
+      return `https://bingx.com/en/perpetual/${b}-USDT`;
     case "lbank":
       return `https://www.lbank.com/futures/${b}USDT/`;
     case "xt":
       return `https://www.xt.com/en/futures/trade/${b}_usdt`;
+    case "htx":
+      return `https://www.htx.com/futures/linear_swap/exchange#contract_code=${b}-USDT`;
+    case "kraken":
+      return `https://futures.kraken.com/trade/futures/PF_${b}USD`;
+    case "bitmart":
+      return `https://derivatives.bitmart.com/en-US?symbol=${b}USDT`;
+    case "toobit":
+      return `https://www.toobit.com/futures/${b}-SWAP-USDT`;
+    case "coinw":
+      return `https://www.coinw.com/futures/usdt/${b.toLowerCase()}usdt`;
+    case "ourbit":
+      return `https://futures.ourbit.com/exchange/${b}_USDT`;
+    case "zoomex":
+      return `https://www.zoomex.com/trade/usdt/${b}USDT`;
+    case "coinex":
+      return `https://www.coinex.com/futures/${b}-USDT`;
+    case "phemex":
+      return `https://phemex.com/futures/${b}-USDT`;
+    case "bitunix":
+      return `https://www.bitunix.com/futures/${b}USDT`;
+    case "whitebit":
+      return `https://whitebit.com/trade/${b}-PERP`;
+    case "tapbit":
+      return `https://www.tapbit.com/futures/${b}-SWAP`;
+    case "ascendex":
+      return `https://ascendex.com/en/futures-perpetualcontract-trading/${b.toLowerCase()}-perp`;
+    case "bitrue":
+      return `https://www.bitrue.com/futures/${b}`;
+    case "blofin":
+      return `https://blofin.com/futures/${b}-USDT`;
+    case "woox":
+      return `https://dex.woo.org/en/trade?symbol=PERP_${b}_USDT`;
     default:
       return null;
   }
@@ -186,6 +226,12 @@ export function FundingTableView({
     return out;
   }, [columnOrder, columnVisibility]);
 
+  /** Минимальная ширина таблицы растёт с числом колонок — на широком окне видно больше бирж без лишней «пустой» ширины. */
+  const tableMinWidthPx = useMemo(
+    () => Math.max(720, 120 + visibleColumns.length * 58),
+    [visibleColumns.length],
+  );
+
   const pendingBase = compare && compare.exchangeB === null ? compare.base : null;
   const pendingExchange = compare && compare.exchangeB === null ? compare.exchangeA : null;
 
@@ -216,8 +262,14 @@ export function FundingTableView({
         </button>
       </div>
     )}
-    <div className="relative overflow-auto rounded-lg border bg-card">
-      <Table className="min-w-[1100px]">
+    <div className="relative w-full min-w-0 overflow-x-auto overflow-y-auto rounded-lg border bg-card">
+      <Table
+        className="w-full text-xs [&_th]:h-9 [&_th]:px-1.5 [&_td]:px-1.5 [&_td]:py-1.5"
+        style={{
+          /** Шире контента — на всю ширину окна; уже — горизонтальный скролл */
+          minWidth: `max(100%, ${tableMinWidthPx}px)`,
+        }}
+      >
         <TableHeader className="sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/75">
           <TableRow>
             {visibleColumns.map((id) => {
@@ -380,6 +432,9 @@ function CellRenderer({
 
   const slug = col as ExchangeAdapterSlug;
   const v = row.ratesByExchange[slug] ?? null;
+  const intervalH =
+    row.fundingIntervalHoursByExchange?.[slug] ?? undefined;
+  const intervalLabel = formatFundingIntervalShortLabel(intervalH);
   const label = EXCHANGE_LABELS[slug];
   const isSelected = slug === pendingExchange;
   const spreadExtremes = row.maxSpreadSlugs ?? [];
@@ -409,7 +464,14 @@ function CellRenderer({
       }
       aria-label={`История фандинга ${row.baseAsset} на ${label}`}
     >
-      {formatFundingPercent(v)}
+      <span className="inline-flex flex-wrap items-baseline gap-x-1 gap-y-0">
+        <span>{formatFundingPercent(v)}</span>
+        {intervalLabel ? (
+          <span className="text-[10px] font-normal text-muted-foreground">
+            {intervalLabel}
+          </span>
+        ) : null}
+      </span>
     </button>
   );
 }

@@ -220,6 +220,66 @@ export function computeFundingSums(
   return periods.map((d, i) => ({ days: d, sum: sums[i]! }));
 }
 
+/** Глобальная доля [0,1] по оси X графика: 0 — самое раннее событие, 1 — самое позднее. */
+export function clientXToGlobalFrac(
+  svg: SVGSVGElement,
+  clientX: number,
+  viewStart: number,
+  viewEnd: number,
+): number {
+  const { x } = clientToSvg(svg, clientX, 0);
+  const relX = x - VB.left;
+  const t = clamp(relX / PLOT_W, 0, 1);
+  return viewStart + t * (viewEnd - viewStart);
+}
+
+export type BrushFundingSum = {
+  sum: number;
+  count: number;
+  fromTime: string;
+  toTime: string;
+};
+
+/** Сумма ставок (доли) по всем событиям, попавшим в окно [fracLo, fracHi] на общей шкале времени. */
+export function sumFundingForGlobalFracWindow(
+  rows: DataRow[],
+  fracA: number,
+  fracB: number,
+): BrushFundingSum | null {
+  const n = rows.length;
+  if (n < 1) return null;
+  const a = clamp(Math.min(fracA, fracB), 0, 1);
+  const b = clamp(Math.max(fracA, fracB), 0, 1);
+  if (n === 1) {
+    const f = 0.5;
+    const hit = f >= a - 1e-12 && f <= b + 1e-12;
+    return {
+      sum: hit ? rows[0]!.r : 0,
+      count: hit ? 1 : 0,
+      fromTime: rows[0]!.fundingTime,
+      toTime: rows[0]!.fundingTime,
+    };
+  }
+  const iMin = Math.max(0, Math.ceil(a * (n - 1) - 1e-9));
+  const iMax = Math.min(n - 1, Math.floor(b * (n - 1) + 1e-9));
+  if (iMin > iMax) {
+    return {
+      sum: 0,
+      count: 0,
+      fromTime: rows[0]!.fundingTime,
+      toTime: rows[n - 1]!.fundingTime,
+    };
+  }
+  let sum = 0;
+  for (let i = iMin; i <= iMax; i++) sum += rows[i]!.r;
+  return {
+    sum,
+    count: iMax - iMin + 1,
+    fromTime: rows[iMin]!.fundingTime,
+    toTime: rows[iMax]!.fundingTime,
+  };
+}
+
 export function computeLatestRate(
   points: { fundingTime: string; rate: string }[],
 ): number | null {

@@ -1,4 +1,5 @@
 import { fetchJson, fetchWithRetry } from "@/lib/http/fetchJson";
+import { normalizeStandardFundingIntervalHours } from "@/lib/formatters/funding";
 import type {
   ExchangeFundingAdapter,
   ExchangeAdapterSlug,
@@ -22,6 +23,7 @@ type OkxFundingRate = {
   fundingRate: string;
   nextFundingTime?: string;
   fundingTime?: string;
+  prevFundingTime?: string;
 };
 
 function baseFromInstId(instId: string): string | null {
@@ -101,12 +103,23 @@ export const okxAdapter: ExchangeFundingAdapter = {
         );
         if (fr.code !== "0" || !fr.data?.[0]) return null;
         const row = fr.data[0];
+        let fundingIntervalHours: number | null = null;
+        if (row.nextFundingTime && row.fundingTime) {
+          const spanMs =
+            Number(row.nextFundingTime) - Number(row.fundingTime);
+          if (Number.isFinite(spanMs) && spanMs > 0) {
+            fundingIntervalHours = normalizeStandardFundingIntervalHours(
+              spanMs / 3_600_000,
+            );
+          }
+        }
         return {
           nativeSymbol: row.instId,
           rate: row.fundingRate,
           nextFundingTime: row.nextFundingTime
             ? new Date(Number(row.nextFundingTime))
             : null,
+          fundingIntervalHours,
         } satisfies LatestFunding;
       } catch {
         return null;
@@ -159,7 +172,12 @@ export const okxAdapter: ExchangeFundingAdapter = {
 
   async fetchFundingHistory(nativeSymbol, range) {
     const out: FundingHistoryPoint[] = [];
-    let before: string | undefined = undefined;
+    /**
+     * OKX returns rows newest-first. `before` = fundingTime requests rows **newer**
+     * than that ts (same window as the first page), so paging with `before` duplicates
+     * almost every row. Use `after` = oldest ts on the page to load **older** history.
+     */
+    let after: string | undefined = undefined;
 
     for (let i = 0; i < 200; i++) {
       const url = new URL(
@@ -167,7 +185,7 @@ export const okxAdapter: ExchangeFundingAdapter = {
       );
       url.searchParams.set("instId", nativeSymbol);
       url.searchParams.set("limit", "100");
-      if (before) url.searchParams.set("before", before);
+      if (after) url.searchParams.set("after", after);
 
       const data = await fetchWithRetry(
         () => fetchJson<OkxResp<OkxFundingRate[]>>(url.toString()),
@@ -191,9 +209,9 @@ export const okxAdapter: ExchangeFundingAdapter = {
 
       const oldest = list[list.length - 1];
       if (!oldest?.fundingTime) break;
-      const nextBefore = oldest.fundingTime;
-      if (before === nextBefore) break;
-      before = nextBefore;
+      const nextAfter = oldest.fundingTime;
+      if (after === nextAfter) break;
+      after = nextAfter;
 
       const oldestMs = Number(oldest.fundingTime);
       if (oldestMs < range.since.getTime()) break;

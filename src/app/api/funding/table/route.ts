@@ -4,6 +4,7 @@ import {
   getLiveFundingTableNow,
   getLiveFundingTablePeriod,
 } from "@/lib/services/funding-table-live";
+import { maybeStartTelegramSpreadDigestScheduler } from "@/lib/services/telegram-spread-digest-scheduler";
 import {
   normalizeFundingTableSortDir,
   normalizeFundingTableSortKey,
@@ -13,11 +14,15 @@ import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
 import type { FundingTableResult } from "@/lib/services/funding-table";
 
 export const runtime = "nodejs";
+/** Vercel / хостинг: иначе «Неделя/Месяц» и тяжёлые снимки обрываются по умолчанию ~10–60 с. */
+export const maxDuration = 300;
+/** Запускаем scheduler и в web-процессе (если worker не поднят), чтобы отправка по слотам не зависела от отдельного сервиса. */
+maybeStartTelegramSpreadDigestScheduler();
 
 function parseVisible(raw: string | null): ExchangeAdapterSlug[] {
   if (!raw) return [...ALL_EXCHANGE_SLUGS];
   const parts = raw
-    .split(",")
+    .split(/[|,]+/)
     .map((s) => s.trim())
     .filter(Boolean) as ExchangeAdapterSlug[];
   const allowed = new Set<string>(ALL_EXCHANGE_SLUGS);
@@ -26,7 +31,15 @@ function parseVisible(raw: string | null): ExchangeAdapterSlug[] {
 }
 
 function parsePeriod(raw: string | null): FundingPeriod {
-  if (raw === "week" || raw === "month" || raw === "now") return raw;
+  if (
+    raw === "day" ||
+    raw === "threeDays" ||
+    raw === "week" ||
+    raw === "month" ||
+    raw === "now"
+  ) {
+    return raw;
+  }
   return "now";
 }
 
@@ -56,6 +69,7 @@ export async function GET(req: Request) {
     url.searchParams.get("dir"),
     sortBy,
   );
+  const fullList = url.searchParams.get("full") === "1";
 
   const opts = {
     period,
@@ -77,6 +91,7 @@ export async function GET(req: Request) {
         sortBy: opts.sortBy,
         sortDir: opts.sortDir,
         basesFilter,
+        fullList,
       });
       return json(
         data,
@@ -84,8 +99,9 @@ export async function GET(req: Request) {
       );
     }
 
+    /** Периоды, кроме «Сейчас» — только live-суммы с API (как до Prisma-ветки): БД истории неполная и даёт другие цифры и «пустые» биржи. */
     const data = await getLiveFundingTablePeriod({
-      period: period as "week" | "month",
+      period: period as "day" | "threeDays" | "week" | "month",
       q: opts.q,
       page: opts.page,
       pageSize: opts.pageSize,

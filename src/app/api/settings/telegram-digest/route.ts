@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 import {
   getTelegramDigestConfig,
+  type TelegramDigestMetric,
   upsertTelegramDigestConfig,
 } from "@/lib/services/telegram-digest-config";
+import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
 
 export const runtime = "nodejs";
 
@@ -28,6 +30,8 @@ export async function GET() {
     return NextResponse.json({
       maxSpreadThresholdPct: cfg.maxSpreadThreshold * 100,
       mskSlots: cfg.mskSlots,
+      exchanges: cfg.exchanges,
+      metric: cfg.metric,
       enabled: cfg.enabled,
       updatedAt: cfg.updatedAt,
       requiresSecret,
@@ -60,6 +64,8 @@ export async function GET() {
 type PutBody = {
   maxSpreadThresholdPct?: number;
   mskSlots?: string[];
+  exchanges?: ExchangeAdapterSlug[];
+  metric?: TelegramDigestMetric;
   enabled?: boolean;
 };
 
@@ -84,15 +90,28 @@ export async function PUT(req: Request) {
   if (!Array.isArray(body.mskSlots)) {
     return NextResponse.json({ error: "mskSlots: массив строк HH:MM" }, { status: 400 });
   }
+  if (!Array.isArray(body.exchanges)) {
+    return NextResponse.json({ error: "exchanges: массив slug бирж" }, { status: 400 });
+  }
+  if (body.metric !== "maxSpread" && body.metric !== "maxFunding") {
+    return NextResponse.json(
+      { error: "metric: maxSpread или maxFunding" },
+      { status: 400 },
+    );
+  }
   try {
     const cfg = await upsertTelegramDigestConfig(prisma, {
       maxSpreadThreshold: pct / 100,
       mskSlots: body.mskSlots,
+      exchanges: body.exchanges,
+      metric: body.metric,
       enabled: Boolean(body.enabled),
     });
     return NextResponse.json({
       maxSpreadThresholdPct: cfg.maxSpreadThreshold * 100,
       mskSlots: cfg.mskSlots,
+      exchanges: cfg.exchanges,
+      metric: cfg.metric,
       enabled: cfg.enabled,
       updatedAt: cfg.updatedAt,
     });

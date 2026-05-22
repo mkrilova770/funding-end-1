@@ -7,6 +7,7 @@ import {
 } from "@/lib/services/funding-history-series";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 const BASE_RE = /^[A-Z0-9]{1,40}$/;
 

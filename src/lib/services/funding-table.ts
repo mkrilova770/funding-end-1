@@ -2,16 +2,28 @@ import type { PrismaClient } from "@prisma/client";
 import { ALL_EXCHANGE_SLUGS } from "@/lib/exchanges";
 import type { ExchangeAdapterSlug } from "@/lib/exchanges/types";
 
-export type FundingPeriod = "now" | "week" | "month";
+export type FundingPeriod = "now" | "day" | "threeDays" | "week" | "month";
 
-export type FundingTableSortKey = "coins" | "maxSpread" | ExchangeAdapterSlug;
+export type FundingTableSortKey =
+  | "coins"
+  | "maxSpread"
+  | "maxFunding"
+  | "minFunding"
+  | ExchangeAdapterSlug;
 
 export type FundingTableSortDir = "asc" | "desc";
 
 export function normalizeFundingTableSortKey(
   raw: string | null | undefined,
 ): FundingTableSortKey {
-  if (raw === "coins" || raw === "maxSpread") return raw;
+  if (
+    raw === "coins" ||
+    raw === "maxSpread" ||
+    raw === "maxFunding" ||
+    raw === "minFunding"
+  ) {
+    return raw;
+  }
   if (raw && ALL_EXCHANGE_SLUGS.includes(raw as ExchangeAdapterSlug)) {
     return raw as ExchangeAdapterSlug;
   }
@@ -26,6 +38,23 @@ export function normalizeFundingTableSortDir(
   return sortBy === "coins" ? "asc" : "desc";
 }
 
+/** Kraken (XBT:USD) и др. — одна строка «BTC» для кросс-биржевой таблицы. */
+export function normalizeMergeBase(base: string): string {
+  const u = base.trim().toUpperCase();
+  if (u === "XBT") return "BTC";
+  return u;
+}
+
+/**
+ * Раньше поднимала BTC/ETH вверх; теперь порядок только от сортировки/фильтров.
+ */
+export function withPinnedMajorsFirst(
+  rows: FundingTableRow[],
+  _opts: { basesFilter?: string[]; q?: string },
+): FundingTableRow[] {
+  return rows;
+}
+
 /**
  * Сортировка строк таблицы: монета (A–Z), макс. спред или ставка конкретной биржи.
  * Пустые / нечисловые значения уходят в конец; при равенстве — по тикеру.
@@ -35,6 +64,23 @@ export function sortFundingTableRows(
   sortBy: FundingTableSortKey,
   sortDir: FundingTableSortDir,
 ): FundingTableRow[] {
+  function pickExtreme(
+    rates: Partial<Record<ExchangeAdapterSlug, number | null>>,
+    mode: "maxPositive" | "minNegative",
+  ): number | null {
+    const vals: number[] = [];
+    for (const v of Object.values(rates)) {
+      if (v === null || v === undefined || !Number.isFinite(v)) continue;
+      if (mode === "maxPositive") {
+        if (v > 0) vals.push(v);
+      } else if (v < 0) {
+        vals.push(v);
+      }
+    }
+    if (vals.length === 0) return null;
+    return mode === "maxPositive" ? Math.max(...vals) : Math.min(...vals);
+  }
+
   return [...rows].sort((a, b) => {
     if (sortBy === "coins") {
       const c = a.baseAsset.localeCompare(b.baseAsset);
@@ -44,10 +90,18 @@ export function sortFundingTableRows(
     const av =
       sortBy === "maxSpread"
         ? a.maxSpread
+        : sortBy === "maxFunding"
+          ? pickExtreme(a.ratesByExchange, "maxPositive")
+          : sortBy === "minFunding"
+            ? pickExtreme(a.ratesByExchange, "minNegative")
         : (a.ratesByExchange[sortBy] ?? null);
     const bv =
       sortBy === "maxSpread"
         ? b.maxSpread
+        : sortBy === "maxFunding"
+          ? pickExtreme(b.ratesByExchange, "maxPositive")
+          : sortBy === "minFunding"
+            ? pickExtreme(b.ratesByExchange, "minNegative")
         : (b.ratesByExchange[sortBy] ?? null);
 
     const aNull = av === null || av === undefined || !Number.isFinite(av);
@@ -73,7 +127,34 @@ export type FundingTableRow = {
   /** До двух бирж: одна с макс. ставкой, одна с мин. (при ничьей — первая по порядку колонок). */
   maxSpreadSlugs: ExchangeAdapterSlug[];
   ratesByExchange: Partial<Record<ExchangeAdapterSlug, number | null>>;
+  /** Интервал начисления фандинга (часы), по данным API «Сейчас». */
+  fundingIntervalHoursByExchange: Partial<
+    Record<ExchangeAdapterSlug, number | null>
+  >;
 };
+
+/** Строка без ставок (все видимые биржи — null), для сохранённых/поиска при отсутствии данных в снимке. */
+export function emptyFundingTableRow(
+  baseAsset: string,
+  visible: ExchangeAdapterSlug[],
+): FundingTableRow {
+  const ratesByExchange: Partial<Record<ExchangeAdapterSlug, number | null>> =
+    {};
+  const fundingIntervalHoursByExchange: Partial<
+    Record<ExchangeAdapterSlug, number | null>
+  > = {};
+  for (const slug of visible) {
+    ratesByExchange[slug] = null;
+    fundingIntervalHoursByExchange[slug] = null;
+  }
+  return {
+    baseAsset,
+    maxSpread: null,
+    maxSpreadSlugs: [],
+    ratesByExchange,
+    fundingIntervalHoursByExchange,
+  };
+}
 
 export type FundingTableResult = {
   updatedAt: string | null;
@@ -89,12 +170,21 @@ export type FundingTableResult = {
     live?: boolean;
     /** Нет БД — недоступны суммы за неделю/месяц. */
     needsHistoryDb?: boolean;
+    /** «Сейчас»: полный список строк без сортировки/пагинации на сервере — сортировка в UI. */
+    fullList?: boolean;
   };
 };
 
 function periodToSince(period: FundingPeriod): Date | null {
   if (period === "now") return null;
-  const days = period === "week" ? 7 : 30;
+  const days =
+    period === "day"
+      ? 1
+      : period === "threeDays"
+        ? 3
+        : period === "week"
+          ? 7
+          : 30;
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 }
 
@@ -155,23 +245,39 @@ export async function getFundingTable(
     visibleExchanges: ExchangeAdapterSlug[];
     sortBy: FundingTableSortKey;
     sortDir: FundingTableSortDir;
+    /** Вкладка «Сохранённые»: только эти тикеры (без полного distinct по рынку). */
+    basesFilter?: string[];
   },
 ): Promise<FundingTableResult> {
   const visible = opts.visibleExchanges;
   const since = periodToSince(opts.period);
 
-  const distinctBases = await client.market.findMany({
-    where: { exchange: { slug: { in: visible } } },
-    distinct: ["baseAsset"],
-    select: { baseAsset: true },
-  });
-
-  let bases = distinctBases.map((b) => b.baseAsset);
   const q = opts.q?.trim().toLowerCase();
-  if (q) {
-    bases = bases.filter((b) => b.toLowerCase().includes(q));
+  let bases: string[];
+
+  if (opts.basesFilter?.length) {
+    const re = /^[A-Z0-9]{1,32}$/;
+    bases = [
+      ...new Set(
+        opts.basesFilter
+          .map((x) => x.trim().toUpperCase())
+          .filter((x) => re.test(x)),
+      ),
+    ].sort((a, b) => a.localeCompare(b));
+    if (q) bases = bases.filter((b) => b.toLowerCase().includes(q));
+  } else {
+    const distinctBases = await client.market.findMany({
+      where: { exchange: { slug: { in: visible } } },
+      distinct: ["baseAsset"],
+      select: { baseAsset: true },
+    });
+
+    bases = distinctBases.map((b) => b.baseAsset);
+    if (q) {
+      bases = bases.filter((b) => b.toLowerCase().includes(q));
+    }
+    bases.sort((a, b) => a.localeCompare(b));
   }
-  bases.sort((a, b) => a.localeCompare(b));
 
   const ratesByBase = new Map<
     string,
@@ -266,10 +372,17 @@ export async function getFundingTable(
   const built: FundingTableRow[] = bases.map((base) => {
     const rates = ratesByBase.get(base) ?? {};
     const { maxSpread, maxSpreadSlugs } = computeSpreadMeta(rates, visible);
-    return { baseAsset: base, maxSpread, maxSpreadSlugs, ratesByExchange: rates };
+    return {
+      baseAsset: base,
+      maxSpread,
+      maxSpreadSlugs,
+      ratesByExchange: rates,
+      fundingIntervalHoursByExchange: {},
+    };
   });
 
-  const sorted = sortFundingTableRows(built, opts.sortBy, opts.sortDir);
+  let sorted = sortFundingTableRows(built, opts.sortBy, opts.sortDir);
+  sorted = withPinnedMajorsFirst(sorted, { q: opts.q });
 
   const page = Math.max(1, opts.page);
   const pageSize = Math.min(200, Math.max(5, opts.pageSize));
